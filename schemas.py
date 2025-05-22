@@ -1,47 +1,75 @@
-from marshmallow import Schema, fields, validates, ValidationError, validates_schema
-import re
+from pydantic import BaseModel, EmailStr, field_validator
+from typing import List, Optional
 
-class UserSchema(Schema):
-    id = fields.Int(dump_only=True)
-    email = fields.Email(required=True)
-    role = fields.Str(required=True, validate=lambda x: x in ['participant', 'creator'])
-    password = fields.Str(required=True, load_only=True, validate=lambda x: len(x) >= 6)
+class UserSchema(BaseModel):
+    email: EmailStr
+    role: str
+    password: str
 
-    @validates('email')
-    def validate_email(self, value):
-        if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', value):
-            raise ValidationError('Invalid email format')
+    @field_validator('role')
+    def validate_role(self, value: str):
+        if value not in ['participant', 'creator']:
+            raise ValueError('Role must be "participant" or "creator"')
+        return value
 
-class TestSchema(Schema):
-    id = fields.Int(dump_only=True)
-    title = fields.Str(required=True, validate=lambda x: 1 <= len(x) <= 200)
-    description = fields.Str(allow_none=True)
-    creator_id = fields.Int(dump_only=True)
-    time_limit = fields.Int(allow_none=True, validate=lambda x: x > 0 if x is not None else True)
-    shuffle_questions = fields.Bool(default=False)
+    @field_validator('password')
+    def validate_password(self, value: str):
+        if len(value) < 6:
+            raise ValueError('Password must be at least 6 characters')
+        return value
 
-class QuestionSchema(Schema):
-    id = fields.Int(dump_only=True)
-    test_id = fields.Int(dump_only=True)
-    text = fields.Str(required=True, validate=lambda x: len(x) > 0)
-    type = fields.Str(required=True, validate=lambda x: x in ['open', 'multiple_choice'])
-    options = fields.List(fields.Str, allow_none=True)
-    correct_answer = fields.Str(allow_none=True)
+class TestSchema(BaseModel):
+    title: str
+    description: Optional[str] = None
+    time_limit: Optional[int] = None
+    shuffle_questions: bool = False
 
-    @validates_schema
-    def validate_options(self, data, **kwargs):
-        if data['type'] == 'multiple_choice':
-            if not data.get('options') or len(data['options']) < 2 or len(data['options']) > 5:
-                raise ValidationError('Multiple choice questions must have 2-5 options')
-            if not data.get('correct_answer') or data['correct_answer'] not in data['options']:
-                raise ValidationError('Correct answer must be one of the options')
+    @field_validator('title')
+    def validate_title(self, value: str):
+        if not (1 <= len(value) <= 200):
+            raise ValueError('Title length must be between 1 and 200 characters')
+        return value
 
-class AnswerSchema(Schema):
-    question_id = fields.Int(required=True)
-    answer = fields.Str(required=True, validate=lambda x: len(x) <= 200)
-    answer_time = fields.Float(allow_none=True, validate=lambda x: x >= 0 if x is not None else True)
+    @field_validator('time_limit')
+    def validate_time_limit(self, value: Optional[int]):
+        if value is not None and value <= 0:
+            raise ValueError('Time limit must be positive')
+        return value
 
-user_schema = UserSchema()
-test_schema = TestSchema()
-question_schema = QuestionSchema(many=True)
-answer_schema = AnswerSchema(many=True)
+class QuestionSchema(BaseModel):
+    text: str
+    type: str
+    options: Optional[List[str]] = None
+    correct_answer: Optional[str] = None
+
+    @field_validator('type')
+    def validate_type(self, value: str):
+        if value not in ['open', 'multiple_choice']:
+            raise ValueError('Type must be "open" or "multiple_choice"')
+        return value
+
+    @field_validator('options')
+    def validate_options(self, value: Optional[List[str]], values: dict):
+        if values.get('type') == 'multiple_choice':
+            if not value or len(value) < 2 or len(value) > 5:
+                raise ValueError('Multiple choice questions must have 2-5 options')
+            if values.get('correct_answer') not in value:
+                raise ValueError('Correct answer must be one of the options')
+        return value
+
+class AnswerSchema(BaseModel):
+    question_id: int
+    answer: str
+    answer_time: Optional[float] = None
+
+    @field_validator('answer')
+    def validate_answer(self, value: str):
+        if len(value) > 200:
+            raise ValueError('Answer length must not exceed 200 characters')
+        return value
+
+    @field_validator('answer_time')
+    def validate_answer_time(self, value: Optional[float]):
+        if value is not None and value < 0:
+            raise ValueError('Answer time must be non-negative')
+        return value
