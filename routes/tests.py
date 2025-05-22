@@ -4,8 +4,7 @@ import aiomysql
 import json
 import logging
 from db import get_db
-from schemas import test_schema, question_schema
-from utils import get_language, translate_message
+from utils import get_language, translate_message, handle_db_error, check_creator_permission
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 import os
@@ -39,37 +38,17 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
     lang = get_language(request)
     logger.info(f'Create test attempt by user ID={user_id}')
 
-    try:
-        validated_test = test_schema.load(data.dict(exclude={'questions'}))
-        validated_questions = question_schema.load(data.questions, many=True)
-    except Exception as e:
-        logger.warning(f'Validation error: {e}')
-        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
-
     async with cursor:
         try:
-            # Проверка уникальности заголовка теста
+            await check_creator_permission(cursor, user_id, lang=lang)
             await cursor.execute("SELECT id FROM tests WHERE title = %s", (data.title,))
             if await cursor.fetchone():
-                logger.warning(f'Test with title {data.title} already exists')
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
-
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
             await cursor.execute(
                 "INSERT INTO tests (title, description, creator_id, time_limit, shuffle_questions) "
                 "VALUES (%s, %s, %s, %s, %s)",
-                (
-                    data.title,
-                    data.description,
-                    user_id,
-                    data.time_limit,
-                    data.shuffle_questions
-                )
+                (data.title, data.description, user_id, data.time_limit, data.shuffle_questions)
             )
             test_id = cursor.lastrowid
 
@@ -80,71 +59,31 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
                 await cursor.execute(
                     "INSERT INTO questions (test_id, text, type, options, correct_answer) "
                     "VALUES (%s, %s, %s, %s, %s)",
-                    (
-                        test_id,
-                        q['text'],
-                        q['type'],
-                        json.dumps(options) if options else None,
-                        q.get('correct_answer')
-                    )
+                    (test_id, q['text'], q['type'], json.dumps(options) if options else None, q.get('correct_answer'))
                 )
             await cursor.connection.commit()
             logger.info(f'Test created: ID={test_id}, Title={data.title}, Creator ID={user_id}')
-            return {
-                'test_id': test_id,
-                'message': translate_message('test_created', lang)
-            }
-        except aiomysql.IntegrityError as e:
-            logger.error(f'Database error: {e}')
-            raise HTTPException(status_code=500, detail="Database error")
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
+            return {'test_id': test_id, 'message': translate_message('test_created', lang)}
+        except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
+            raise handle_db_error(e)
 
 @tests_router.put("/tests/{id}", summary="Update an existing test")
 async def update_test(id: int, request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
     lang = get_language(request)
     logger.info(f'Update test attempt for test ID={id} by user ID={user_id}')
 
-    try:
-        validated_test = test_schema.load(data.dict(exclude={'questions'}))
-        validated_questions = question_schema.load(data.questions, many=True)
-    except Exception as e:
-        logger.warning(f'Validation error: {e}')
-        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
-
     async with cursor:
         try:
-            # Проверка уникальности заголовка теста (кроме текущего теста)
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
             await cursor.execute("SELECT id FROM tests WHERE title = %s AND id != %s", (data.title, id))
             if await cursor.fetchone():
-                logger.warning(f'Test with title {data.title} already exists')
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
-
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
-            await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
-            test = await cursor.fetchone()
-            if not test or test['creator_id'] != user_id:
-                logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
-                raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
             await cursor.execute(
                 "UPDATE tests SET title = %s, description = %s, time_limit = %s, shuffle_questions = %s "
                 "WHERE id = %s",
-                (
-                    data.title,
-                    data.description,
-                    data.time_limit,
-                    data.shuffle_questions,
-                    id
-                )
+                (data.title, data.description, data.time_limit, data.shuffle_questions, id)
             )
-
             await cursor.execute("DELETE FROM questions WHERE test_id = %s", (id,))
 
             for q in data.questions:
@@ -154,24 +93,13 @@ async def update_test(id: int, request: Request, data: TestRequest, user_id: int
                 await cursor.execute(
                     "INSERT INTO questions (test_id, text, type, options, correct_answer) "
                     "VALUES (%s, %s, %s, %s, %s)",
-                    (
-                        id,
-                        q['text'],
-                        q['type'],
-                        json.dumps(options) if options else None,
-                        q.get('correct_answer')
-                    )
+                    (id, q['text'], q['type'], json.dumps(options) if options else None, q.get('correct_answer'))
                 )
-
             await cursor.connection.commit()
             logger.info(f'Test updated: ID={id}, Title={data.title}')
             return {'message': translate_message('test_updated', lang)}
-        except aiomysql.IntegrityError as e:
-            logger.error(f'Database error: {e}')
-            raise HTTPException(status_code=500, detail="Database error")
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
+        except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
+            raise handle_db_error(e)
 
 @tests_router.delete("/tests/{id}", summary="Delete a test")
 async def delete_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
@@ -180,22 +108,10 @@ async def delete_test(id: int, request: Request, user_id: int = Depends(get_curr
 
     async with cursor:
         try:
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
-            await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
-            test = await cursor.fetchone()
-            if not test or test['creator_id'] != user_id:
-                logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
-                raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
-
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
             await cursor.execute("DELETE FROM tests WHERE id = %s", (id,))
             await cursor.connection.commit()
             logger.info(f'Test deleted: ID={id}')
             return {'message': translate_message('test_deleted', lang)}
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)

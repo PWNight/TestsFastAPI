@@ -8,12 +8,12 @@ import pandas as pd
 from io import BytesIO
 import logging
 from db import get_db
-from schemas import answer_schema
-from utils import get_language, translate_message
+from utils import get_language, translate_message, handle_db_error, check_creator_permission, check_participant_permission
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 import os
 from dotenv import load_dotenv
+from pandas.io.excel import ExcelWriter
 
 load_dotenv()
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
@@ -41,26 +41,16 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
 
     async with cursor:
         try:
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'participant':
-                logger.warning(f'No permission: User ID={user_id} is not a participant')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
+            await check_participant_permission(cursor, user_id, lang)
             await cursor.execute("SELECT id FROM tests WHERE id = %s", (id,))
             if not await cursor.fetchone():
-                logger.warning(f'Test not found: ID={id}')
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
             await cursor.execute("SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s", (user_id, id))
             if await cursor.fetchone():
-                logger.warning(f'No permission: User ID={user_id} already attempted test ID={id}')
                 raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
-            await cursor.execute(
-                "INSERT INTO test_attempts (user_id, test_id) VALUES (%s, %s)",
-                (user_id, id)
-            )
+            await cursor.execute("INSERT INTO test_attempts (user_id, test_id) VALUES (%s, %s)", (user_id, id))
             attempt_id = cursor.lastrowid
 
             await cursor.execute("SELECT shuffle_questions FROM tests WHERE id = %s", (id,))
@@ -68,10 +58,8 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
 
             await cursor.execute("SELECT id, text, type, options FROM questions WHERE test_id = %s", (id,))
             questions = await cursor.fetchall()
-
             if shuffle:
                 random.shuffle(questions)
-                logger.info(f'Questions shuffled for test ID={id}')
 
             for q in questions:
                 q['options'] = json.loads(q['options']) if q['options'] else None
@@ -80,18 +68,10 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
             logger.info(f'Test started: ID={id}, Attempt ID={attempt_id}, User ID={user_id}')
             return {
                 'test_id': id,
-                'questions': [
-                    {
-                        'id': q['id'],
-                        'text': q['text'],
-                        'type': q['type'],
-                        'options': q['options']
-                    } for q in questions
-                ]
+                'questions': [{'id': q['id'], 'text': q['text'], 'type': q['type'], 'options': q['options']} for q in questions]
             }
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)
 
 @test_execution_router.post("/tests/{id}/submit", summary="Submit test answers")
 async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
@@ -99,44 +79,24 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
     logger.info(f'Submit test attempt for test ID={id} by user ID={user_id}')
 
     if not data.answers:
-        logger.warning(f'Validation error: No answers provided for test ID={id}')
-        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
-
-    try:
-        validated_answers = answer_schema.load(data.answers, many=True)
-    except Exception as e:
-        logger.warning(f'Validation error: {e}')
         raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
     async with cursor:
         try:
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'participant':
-                logger.warning(f'No permission: User ID={user_id} is not a participant')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
+            await check_participant_permission(cursor, user_id, lang)
             await cursor.execute("SELECT id FROM tests WHERE id = %s", (id,))
             if not await cursor.fetchone():
-                logger.warning(f'Test not found: ID={id}')
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
             await cursor.execute("SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s AND end_time IS NULL", (user_id, id))
             attempt = await cursor.fetchone()
             if not attempt:
-                logger.warning(f'No permission: No active attempt for user ID={user_id}, test ID={id}')
                 raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
-            # Проверка, что все question_id принадлежат тесту
             question_ids = [ans['question_id'] for ans in data.answers]
-            await cursor.execute(
-                "SELECT id FROM questions WHERE test_id = %s AND id IN %s",
-                (id, tuple(question_ids) if question_ids else (0,))
-            )
+            await cursor.execute("SELECT id FROM questions WHERE test_id = %s AND id IN %s", (id, tuple(question_ids) if question_ids else (0,)))
             valid_question_ids = {q['id'] for q in await cursor.fetchall()}
-            invalid_ids = set(question_ids) - valid_question_ids
-            if invalid_ids:
-                logger.warning(f'Validation error: Invalid question IDs {invalid_ids} for test ID={id}')
+            if set(question_ids) - valid_question_ids:
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
             await cursor.execute("SELECT COUNT(*) as count FROM questions WHERE test_id = %s", (id,))
@@ -144,13 +104,10 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
 
             score = 0
             correct_answers = []
-
             for ans in data.answers:
                 await cursor.execute("SELECT correct_answer, test_id FROM questions WHERE id = %s", (ans['question_id'],))
                 question = await cursor.fetchone()
                 if not question or question['test_id'] != id:
-                    await cursor.connection.rollback()
-                    logger.warning(f'Validation error: Invalid question ID={ans["question_id"]} for test ID={id}')
                     raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
                 is_correct = (ans['answer'] == question['correct_answer'])
@@ -160,18 +117,9 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                 await cursor.execute(
                     "INSERT INTO answers (attempt_id, question_id, answer, is_correct, answer_time) "
                     "VALUES (%s, %s, %s, %s, %s)",
-                    (
-                        attempt['id'],
-                        ans['question_id'],
-                        ans['answer'],
-                        is_correct,
-                        ans.get('answer_time', 0)
-                    )
+                    (attempt['id'], ans['question_id'], ans['answer'], is_correct, ans.get('answer_time', 0))
                 )
-                correct_answers.append({
-                    'question_id': ans['question_id'],
-                    'correct_answer': question['correct_answer']
-                })
+                correct_answers.append({'question_id': ans['question_id'], 'correct_answer': question['correct_answer']})
 
             final_score = (score / total_questions) * 100 if total_questions > 0 else 0
             await cursor.execute(
@@ -180,16 +128,9 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
             )
             await cursor.connection.commit()
             logger.info(f'Test submitted: ID={id}, Attempt ID={attempt["id"]}, User ID={user_id}, Score={final_score}')
-            return {
-                'score': final_score,
-                'correct_answers': correct_answers
-            }
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
-        except aiomysql.IntegrityError as e:
-            logger.error(f'Database error: {e}')
-            raise HTTPException(status_code=500, detail="Database error")
+            return {'score': final_score, 'correct_answers': correct_answers}
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)
 
 @test_execution_router.get("/tests/{id}/stats", summary="Retrieve test statistics")
 async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
@@ -198,18 +139,7 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
 
     async with cursor:
         try:
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
-            await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
-            test = await cursor.fetchone()
-            if not test or test['creator_id'] != user_id:
-                logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
-                raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
-
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
             await cursor.execute("SELECT AVG(score) as avg_score FROM test_attempts WHERE test_id = %s", (id,))
             avg_score = (await cursor.fetchone())['avg_score'] or 0
 
@@ -236,15 +166,13 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
                         'average_time': stats['avg_time'] or 0
                     }
 
-            logger.info(f'Stats retrieved for test ID={id}: Avg Score={avg_score}, Avg Time={avg_completion_time}')
             return {
                 'average_score': round(avg_score, 1),
                 'completion_time': round(avg_completion_time, 1),
                 'difficulty': difficulty
             }
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)
 
 @test_execution_router.get("/tests/{id}/stats/export", summary="Export test statistics")
 async def export_stats(id: int, request: Request, format: str = "csv", user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
@@ -252,23 +180,11 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
     logger.info(f'Export stats for test ID={id} by user ID={user_id}, format={format}')
 
     if format not in ['csv', 'json', 'excel']:
-        logger.warning(f'Invalid format: {format}')
         raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
     async with cursor:
         try:
-            await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = await cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
-            await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
-            test = await cursor.fetchone()
-            if not test or test['creator_id'] != user_id:
-                logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
-                raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
-
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
             await cursor.execute(
                 "SELECT user_id, score, start_time, end_time, "
                 "TIMESTAMPDIFF(SECOND, start_time, end_time) as completion_time "
@@ -288,14 +204,13 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
             ]
 
             if format == "json":
-                logger.info(f'Stats exported as JSON for test ID={id}')
                 return data
             elif format == "excel":
                 df = pd.DataFrame(data)
                 output = BytesIO()
-                df.to_excel(output, index=False, engine='openpyxl')
+                with ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False)
                 output.seek(0)
-                logger.info(f'Stats exported as Excel for test ID={id}')
                 return Response(
                     content=output.getvalue(),
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -303,12 +218,10 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
                 )
             else:  # csv
                 df = pd.DataFrame(data)
-                logger.info(f'Stats exported as CSV for test ID={id}')
                 return Response(
                     content=df.to_csv(index=False),
                     media_type="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=test_{id}_stats.csv"}
                 )
-        except aiomysql.OperationalError as e:
-            logger.error(f'Database connection error: {e}')
-            raise HTTPException(status_code=503, detail="Database unavailable")
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)
