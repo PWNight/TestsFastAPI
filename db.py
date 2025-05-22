@@ -2,6 +2,7 @@ import aiomysql
 import logging
 import os
 from dotenv import load_dotenv
+from utils import handle_db_error
 
 load_dotenv()
 
@@ -9,15 +10,14 @@ logger = logging.getLogger('app.db')
 logger.setLevel(logging.INFO)
 
 db_config = {
-    'host': os.getenv('DB_HOST', '127.0.0.1'),
-    'user': os.getenv('DB_USER', 'pwnight'),
-    'password': os.getenv('DB_PASSWORD', 'pwnight'),
-    'db': os.getenv('DB_NAME', 'tests'),
-    'charset': os.getenv('DB_CHARSET', 'utf8mb4'),
+    'host': os.getenv('DB_HOST', os.getenv('DB_HOST')),
+    'user': os.getenv('DB_USER', os.getenv('DB_USER')),
+    'password': os.getenv('DB_PASSWORD', os.getenv('DB_PASSWORD')),
+    'db': os.getenv('DB_NAME', os.getenv('DB_NAME')),
+    'charset': os.getenv('DB_CHARSET', os.getenv('DB_CHARSET')),
     'cursorclass': aiomysql.DictCursor
 }
 
-# Глобальный пул соединений
 pool = None
 
 async def get_db():
@@ -28,49 +28,27 @@ async def get_db():
         async with conn.cursor() as cursor:
             yield cursor
 
-async def check_index_exists(cursor, table_name, index_name):
-    try:
-        await cursor.execute(f"SHOW INDEX FROM {table_name} WHERE Key_name = %s", (index_name,))
-        exists = await cursor.fetchone() is not None
-        logger.info(f"Checked index {index_name} on table {table_name}: {'exists' if exists else 'does not exist'}")
-        return exists
-    except aiomysql.OperationalError as e:
-        logger.error(f"Error checking index {index_name} on table {table_name}: {e}")
-        raise
-
 async def init_db():
     global pool
-    conn = None
     try:
         logger.info('Connecting to MySQL server')
-        conn = await aiomysql.connect(
-            host=db_config['host'],
-            user=db_config['user'],
-            password=db_config['password'],
-            charset=db_config['charset']
-        )
-        async with conn.cursor() as cursor:
-            logger.info('Creating database if not exists')
-            await cursor.execute("CREATE DATABASE IF NOT EXISTS tests CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        async with aiomysql.connect(host=db_config['host'], user=db_config['user'], password=db_config['password'], charset=db_config['charset']) as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute("CREATE DATABASE IF NOT EXISTS tests CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
 
-        conn.close()
-        conn = None
-        logger.info('Connecting to database tests')
         pool = await aiomysql.create_pool(**db_config)
-
         async with pool.acquire() as conn:
             async with conn.cursor() as cursor:
-                logger.info('Creating table users')
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         email VARCHAR(255) UNIQUE NOT NULL,
                         password_hash VARCHAR(128) NOT NULL,
                         role VARCHAR(20) NOT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_user_email (email)
                     )
                 """)
-                logger.info('Creating table tests')
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS tests (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -80,10 +58,10 @@ async def init_db():
                         time_limit INT,
                         shuffle_questions BOOLEAN DEFAULT FALSE,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE
+                        FOREIGN KEY (creator_id) REFERENCES users(id) ON DELETE CASCADE,
+                        INDEX idx_test_creator (creator_id)
                     )
                 """)
-                logger.info('Creating table questions')
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS questions (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -92,10 +70,10 @@ async def init_db():
                         type VARCHAR(20) NOT NULL,
                         options JSON,
                         correct_answer TEXT,
-                        FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE
+                        FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE,
+                        INDEX idx_question_test (test_id)
                     )
                 """)
-                logger.info('Creating table test_attempts')
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS test_attempts (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -105,10 +83,10 @@ async def init_db():
                         start_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                         end_time DATETIME,
                         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                        FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE
+                        FOREIGN KEY (test_id) REFERENCES tests(id) ON DELETE CASCADE,
+                        INDEX idx_attempt_user_test (user_id, test_id)
                     )
                 """)
-                logger.info('Creating table answers')
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS answers (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -121,25 +99,11 @@ async def init_db():
                         FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
                     )
                 """)
-                logger.info('Creating indexes')
-                if not await check_index_exists(cursor, 'users', 'idx_user_email'):
-                    await cursor.execute("CREATE INDEX idx_user_email ON users(email)")
-                if not await check_index_exists(cursor, 'tests', 'idx_test_creator'):
-                    await cursor.execute("CREATE INDEX idx_test_creator ON tests(creator_id)")
-                if not await check_index_exists(cursor, 'questions', 'idx_question_test'):
-                    await cursor.execute("CREATE INDEX idx_question_test ON questions(test_id)")
-                if not await check_index_exists(cursor, 'test_attempts', 'idx_attempt_user_test'):
-                    await cursor.execute("CREATE INDEX idx_attempt_user_test ON test_attempts(user_id, test_id)")
-
-            await conn.commit()
-            logger.info('Database initialized successfully')
-
+                await conn.commit()
+                logger.info('Database initialized successfully')
     except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-        logger.error(f'Database error: {e}')
-        raise
+        raise handle_db_error(e)
     finally:
-        if conn:
-            conn.close()
         if pool:
             pool.close()
             await pool.wait_closed()
