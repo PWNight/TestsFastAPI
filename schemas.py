@@ -1,23 +1,45 @@
-from flask_marshmallow import Marshmallow
-from flask import current_app
+from marshmallow import Schema, fields, validates, ValidationError, validates_schema
+import re
 
-ma = Marshmallow(current_app)
+class UserSchema(Schema):
+    id = fields.Int(dump_only=True)
+    email = fields.Email(required=True)
+    role = fields.Str(required=True, validate=lambda x: x in ['participant', 'creator'])
+    password = fields.Str(required=True, load_only=True, validate=lambda x: len(x) >= 6)
 
-class UserSchema(ma.Schema):
-    class Meta:
-        fields = ('id', 'email', 'role')
+    @validates('email')
+    def validate_email(self, value):
+        if not re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', value):
+            raise ValidationError('Invalid email format')
 
-class TestSchema(ma.Schema):
-    class Meta:
-        fields = ('id', 'title', 'description', 'creator_id', 'time_limit', 'shuffle_questions')
+class TestSchema(Schema):
+    id = fields.Int(dump_only=True)
+    title = fields.Str(required=True, validate=lambda x: 1 <= len(x) <= 200)
+    description = fields.Str(allow_none=True)
+    creator_id = fields.Int(dump_only=True)
+    time_limit = fields.Int(allow_none=True, validate=lambda x: x > 0 if x is not None else True)
+    shuffle_questions = fields.Bool(default=False)
 
-class QuestionSchema(ma.Schema):
-    class Meta:
-        fields = ('id', 'test_id', 'text', 'type', 'options', 'correct_answer')
+class QuestionSchema(Schema):
+    id = fields.Int(dump_only=True)
+    test_id = fields.Int(dump_only=True)
+    text = fields.Str(required=True, validate=lambda x: len(x) > 0)
+    type = fields.Str(required=True, validate=lambda x: x in ['open', 'multiple_choice'])
+    options = fields.List(fields.Str, allow_none=True)
+    correct_answer = fields.Str(allow_none=True)
 
-class AnswerSchema(ma.Schema):
-    class Meta:
-        fields = ('question_id', 'answer')
+    @validates_schema
+    def validate_options(self, data, **kwargs):
+        if data['type'] == 'multiple_choice':
+            if not data.get('options') or len(data['options']) < 2 or len(data['options']) > 5:
+                raise ValidationError('Multiple choice questions must have 2-5 options')
+            if not data.get('correct_answer') or data['correct_answer'] not in data['options']:
+                raise ValidationError('Correct answer must be one of the options')
+
+class AnswerSchema(Schema):
+    question_id = fields.Int(required=True)
+    answer = fields.Str(required=True)
+    answer_time = fields.Float(allow_none=True, validate=lambda x: x >= 0 if x is not None else True)
 
 user_schema = UserSchema()
 test_schema = TestSchema()

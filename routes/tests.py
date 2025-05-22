@@ -1,54 +1,74 @@
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from db import db_config
-import pymysql
+from fastapi import APIRouter, HTTPException, Request, Depends
+from pydantic import BaseModel
+import aiomysql
 import json
-from utils import get_language, translate_message
 import logging
+from db import db_config
+from schemas import test_schema, question_schema
+from utils import get_language, translate_message
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-tests_bp = Blueprint('tests', __name__)
+tests_router = APIRouter()
 logger = logging.getLogger('app.tests')
+security = HTTPBearer()
 
-@tests_bp.route('/tests', methods=['POST'])
-@jwt_required()
-def create_test():
-    user_id = get_jwt_identity()
-    lang = get_language()
+class TestRequest(BaseModel):
+    title: str
+    description: str | None = None
+    time_limit: int | None = None
+    shuffle_questions: bool = False
+    questions: list[dict]
+
+async def get_db():
+    pool = await aiomysql.create_pool(**db_config)
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            yield cursor
+        conn.close()
+    pool.close()
+    await pool.wait_closed()
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, os.getenv('JWT_SECRET_KEY'), algorithms=['HS256'])
+        return payload['sub']
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@tests_router.post("/tests", summary="Create a new test")
+async def create_test(request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    lang = get_language(request)
     logger.info(f'Create test attempt by user ID={user_id}')
 
-    conn = pymysql.connect(**db_config)
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                return jsonify({'message': translate_message('no_permission', lang)}), 403
+        validated_test = test_schema.load(data.dict(exclude={'questions'}))
+        validated_questions = question_schema.load(data.questions, many=True)
+    except Exception as e:
+        logger.warning(f'Validation error: {e}')
+        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
-        data = request.get_json()
-        if not data or not data.get('title') or not data.get('questions'):
-            logger.warning('Validation error: Missing required fields')
-            return jsonify({'message': translate_message('validation_error', lang)}), 400
+    async with cursor:
+        await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        user = await cursor.fetchone()
+        if not user or user['role'] != 'creator':
+            logger.warning(f'No permission: User ID={user_id} is not a creator')
+            raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
-        cursor.execute(
+        await cursor.execute(
             "INSERT INTO tests (title, description, creator_id, time_limit, shuffle_questions) "
             "VALUES (%s, %s, %s, %s, %s)",
             (
-                data['title'],
-                data.get('description'),
+                data.title,
+                data.description,
                 user_id,
-                data.get('time_limit'),
-                data.get('shuffle_questions', False)
+                data.time_limit,
+                data.shuffle_questions
             )
         )
-        test_id = conn.insert_id()
+        test_id = cursor._last_insert_id
 
-        for q in data['questions']:
-            if q['type'] == 'multiple_choice' and (len(q.get('options', [])) < 2 or len(q.get('options', [])) > 5):
-                conn.rollback()
-                logger.warning(f'Validation error: Invalid options for question in test ID={test_id}')
-                return jsonify({'message': translate_message('validation_error', lang)}), 400
-            cursor.execute(
+        for q in data.questions:
+            await cursor.execute(
                 "INSERT INTO questions (test_id, text, type, options, correct_answer) "
                 "VALUES (%s, %s, %s, %s, %s)",
                 (
@@ -59,65 +79,54 @@ def create_test():
                     q.get('correct_answer')
                 )
             )
-        conn.commit()
-        logger.info(f'Test created: ID={test_id}, Title={data["title"]}, Creator ID={user_id}')
-        return jsonify({
+        await cursor._connection.commit()
+        logger.info(f'Test created: ID={test_id}, Title={data.title}, Creator ID={user_id}')
+        return {
             'test_id': test_id,
             'message': translate_message('test_created', lang)
-        }), 201
-    except Exception as e:
-        logger.error(f'Error creating test: {e}')
-        return jsonify({'message': translate_message('validation_error', lang)}), 500
-    finally:
-        conn.close()
+        }
 
-@tests_bp.route('/tests/<int:id>', methods=['PUT'])
-@jwt_required()
-def update_test(id):
-    user_id = get_jwt_identity()
-    lang = get_language()
+@tests_router.put("/tests/{id}", summary="Update an existing test")
+async def update_test(id: int, request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    lang = get_language(request)
     logger.info(f'Update test attempt for test ID={id} by user ID={user_id}')
 
-    conn = pymysql.connect(**db_config)
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                return jsonify({'message': translate_message('no_permission', lang)}), 403
+        validated_test = test_schema.load(data.dict(exclude={'questions'}))
+        validated_questions = question_schema.load(data.questions, many=True)
+    except Exception as e:
+        logger.warning(f'Validation error: {e}')
+        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
-            cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
-            test = cursor.fetchone()
-            if not test or test['creator_id'] != user_id:
-                logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
-                return jsonify({'message': translate_message('test_not_found', lang)}), 404
+    async with cursor:
+        await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        user = await cursor.fetchone()
+        if not user or user['role'] != 'creator':
+            logger.warning(f'No permission: User ID={user_id} is not a creator')
+            raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
-        data = request.get_json()
-        if not data or not data.get('title') or not data.get('questions'):
-            logger.warning('Validation error: Missing required fields')
-            return jsonify({'message': translate_message('validation_error', lang)}), 400
+        await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
+        test = await cursor.fetchone()
+        if not test or test['creator_id'] != user_id:
+            logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
+            raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
-        cursor.execute(
+        await cursor.execute(
             "UPDATE tests SET title = %s, description = %s, time_limit = %s, shuffle_questions = %s "
             "WHERE id = %s",
             (
-                data['title'],
-                data.get('description'),
-                data.get('time_limit'),
-                data.get('shuffle_questions', False),
+                data.title,
+                data.description,
+                data.time_limit,
+                data.shuffle_questions,
                 id
             )
         )
 
-        cursor.execute("DELETE FROM questions WHERE test_id = %s", (id,))
+        await cursor.execute("DELETE FROM questions WHERE test_id = %s", (id,))
 
-        for q in data['questions']:
-            if q['type'] == 'multiple_choice' and (len(q.get('options', [])) < 2 or len(q.get('options', [])) > 5):
-                conn.rollback()
-                logger.warning(f'Validation error: Invalid options for question in test ID={id}')
-                return jsonify({'message': translate_message('validation_error', lang)}), 400
-            cursor.execute(
+        for q in data.questions:
+            await cursor.execute(
                 "INSERT INTO questions (test_id, text, type, options, correct_answer) "
                 "VALUES (%s, %s, %s, %s, %s)",
                 (
@@ -129,43 +138,29 @@ def update_test(id):
                 )
             )
 
-        conn.commit()
-        logger.info(f'Test updated: ID={id}, Title={data["title"]}')
-        return jsonify({'message': translate_message('test_updated', lang)}), 200
-    except Exception as e:
-        logger.error(f'Error updating test ID={id}: {e}')
-        return jsonify({'message': translate_message('validation_error', lang)}), 500
-    finally:
-        conn.close()
+        await cursor._connection.commit()
+        logger.info(f'Test updated: ID={id}, Title={data.title}')
+        return {'message': translate_message('test_updated', lang)}
 
-@tests_bp.route('/tests/<int:id>', methods=['DELETE'])
-@jwt_required()
-def delete_test(id):
-    user_id = get_jwt_identity()
-    lang = get_language()
+@tests_router.delete("/tests/{id}", summary="Delete a test")
+async def delete_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    lang = get_language(request)
     logger.info(f'Delete test attempt for test ID={id} by user ID={user_id}')
 
-    conn = pymysql.connect(**db_config)
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
-            if not user or user['role'] != 'creator':
-                logger.warning(f'No permission: User ID={user_id} is not a creator')
-                return jsonify({'message': translate_message('no_permission', lang)}), 403
+    async with cursor:
+        await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        user = await cursor.fetchone()
+        if not user or user['role'] != 'creator':
+            logger.warning(f'No permission: User ID={user_id} is not a creator')
+            raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
-            cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
-            test = cursor.fetchone()
-            if not test or test['creator_id'] != user_id:
-                logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
-                return jsonify({'message': translate_message('test_not_found', lang)}), 404
+        await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (id,))
+        test = await cursor.fetchone()
+        if not test or test['creator_id'] != user_id:
+            logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={id}')
+            raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
-            cursor.execute("DELETE FROM tests WHERE id = %s", (id,))
-            conn.commit()
-            logger.info(f'Test deleted: ID={id}')
-        return jsonify({'message': translate_message('test_deleted', lang)}), 200
-    except Exception as e:
-        logger.error(f'Error deleting test ID={id}: {e}')
-        return jsonify({'message': translate_message('validation_error', lang)}), 500
-    finally:
-        conn.close()
+        await cursor.execute("DELETE FROM tests WHERE id = %s", (id,))
+        await cursor._connection.commit()
+        logger.info(f'Test deleted: ID={id}')
+        return {'message': translate_message('test_deleted', lang)}

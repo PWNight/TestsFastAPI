@@ -1,78 +1,87 @@
-from flask import Blueprint, request, jsonify
-from werkzeug.security import generate_password_hash, check_password_hash
-from flask_jwt_extended import create_access_token
-from db import db_config
-import pymysql
-from utils import get_language, translate_message
+from fastapi import APIRouter, HTTPException, Request, Depends
+from pydantic import BaseModel
+import aiomysql
+import bcrypt
+import jwt
 import logging
+from db import db_config
+from schemas import user_schema
+from utils import get_language, translate_message
+import os
+from dotenv import load_dotenv
 
-auth_bp = Blueprint('auth', __name__)
+load_dotenv()
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+
+auth_router = APIRouter()
 logger = logging.getLogger('app.auth')
 
-@auth_bp.route('/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    lang = get_language()
-    logger.info(f'Register attempt for email: {data.get("email", "unknown")}')
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    role: str
 
-    if not data or not data.get('email') or not data.get('password') or not data.get('role'):
-        logger.warning('Validation error: Missing required fields')
-        return jsonify({'message': translate_message('validation_error', lang)}), 400
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
-    if data['role'] not in ['participant', 'creator']:
-        logger.warning(f'Validation error: Invalid role {data["role"]}')
-        return jsonify({'message': translate_message('validation_error', lang)}), 400
+async def get_db():
+    pool = await aiomysql.create_pool(**db_config)
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            yield cursor
+        conn.close()
+    pool.close()
+    await pool.wait_closed()
 
-    conn = pymysql.connect(**db_config)
+@auth_router.post("/register", summary="Register a new user")
+async def register(request: Request, data: RegisterRequest, cursor=Depends(get_db)):
+    lang = get_language(request)
+    logger.info(f'Register attempt for email: {data.email}')
+
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id FROM users WHERE email = %s", (data['email'],))
-            if cursor.fetchone():
-                logger.warning(f'Validation error: Email {data["email"]} already exists')
-                return jsonify({'message': translate_message('validation_error', lang)}), 400
+        validated_data = user_schema.load(data.dict())
+    except Exception as e:
+        logger.warning(f'Validation error: {e}')
+        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
-            password_hash = generate_password_hash(data['password'], method='bcrypt')
-            cursor.execute(
-                "INSERT INTO users (email, password_hash, role) VALUES (%s, %s, %s)",
-                (data['email'], password_hash, data['role'])
-            )
-            user_id = conn.insert_id()
-            conn.commit()
-            logger.info(f'User registered: ID={user_id}, Email={data["email"]}, Role={data["role"]}')
-        return jsonify({
+    async with cursor:
+        await cursor.execute("SELECT id FROM users WHERE email = %s", (data.email,))
+        if await cursor.fetchone():
+            logger.warning(f'Validation error: Email {data.email} already exists')
+            raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
+
+        password_hash = bcrypt.hashpw(data.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        await cursor.execute(
+            "INSERT INTO users (email, password_hash, role) VALUES (%s, %s, %s)",
+            (data.email, password_hash, data.role)
+        )
+        user_id = cursor._last_insert_id
+        await cursor._connection.commit()
+        logger.info(f'User registered: ID={user_id}, Email={data.email}, Role={data.role}')
+        return {
             'message': translate_message('user_registered', lang),
             'user_id': user_id
-        }), 201
-    except Exception as e:
-        logger.error(f'Error during registration: {e}')
-        return jsonify({'message': translate_message('validation_error', lang)}), 500
-    finally:
-        conn.close()
+        }
 
-@auth_bp.route('/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    lang = get_language()
-    logger.info(f'Login attempt for email: {data.get("email", "unknown")}')
+@auth_router.post("/login", summary="Authenticate a user")
+async def login(request: Request, data: LoginRequest, cursor=Depends(get_db)):
+    lang = get_language(request)
+    logger.info(f'Login attempt for email: {data.email}')
 
-    if not data or not data.get('email') or not data.get('password'):
-        logger.warning('Validation error: Missing required fields')
-        return jsonify({'message': translate_message('validation_error', lang)}), 400
-
-    conn = pymysql.connect(**db_config)
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id, password_hash FROM users WHERE email = %s", (data['email'],))
-            user = cursor.fetchone()
-            if not user or not check_password_hash(user['password_hash'], data['password']):
-                logger.warning(f'Invalid credentials for email: {data["email"]}')
-                return jsonify({'message': translate_message('invalid_credentials', lang)}), 401
-
-            access_token = create_access_token(identity=user['id'])
-            logger.info(f'User logged in: ID={user["id"]}, Email={data["email"]}')
-            return jsonify({'access_token': access_token}), 200
+        user_schema.load({'email': data.email, 'password': data.password})
     except Exception as e:
-        logger.error(f'Error during login: {e}')
-        return jsonify({'message': translate_message('validation_error', lang)}), 500
-    finally:
-        conn.close()
+        logger.warning(f'Validation error: {e}')
+        raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
+
+    async with cursor:
+        await cursor.execute("SELECT id, password_hash FROM users WHERE email = %s", (data.email,))
+        user = await cursor.fetchone()
+        if not user or not bcrypt.checkpw(data.password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            logger.warning(f'Invalid credentials for email: {data.email}')
+            raise HTTPException(status_code=401, detail=translate_message('invalid_credentials', lang))
+
+        access_token = jwt.encode({'sub': user['id'], 'exp': 3600 * 24}, JWT_SECRET_KEY, algorithm='HS256')
+        logger.info(f'User logged in: ID={user["id"]}, Email={data.email}')
+        return {'access_token': access_token}
