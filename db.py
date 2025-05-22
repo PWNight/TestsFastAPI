@@ -17,13 +17,30 @@ db_config = {
     'cursorclass': aiomysql.DictCursor
 }
 
+# Глобальный пул соединений
+pool = None
+
+async def get_db():
+    global pool
+    if pool is None:
+        pool = await aiomysql.create_pool(**db_config)
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            yield cursor
+
 async def check_index_exists(cursor, table_name, index_name):
-    await cursor.execute(f"SHOW INDEX FROM {table_name} WHERE Key_name = %s", (index_name,))
-    exists = await cursor.fetchone() is not None
-    logger.info(f"Checked index {index_name} on table {table_name}: {'exists' if exists else 'does not exist'}")
-    return exists
+    try:
+        await cursor.execute(f"SHOW INDEX FROM {table_name} WHERE Key_name = %s", (index_name,))
+        exists = await cursor.fetchone() is not None
+        logger.info(f"Checked index {index_name} on table {table_name}: {'exists' if exists else 'does not exist'}")
+        return exists
+    except aiomysql.OperationalError as e:
+        logger.error(f"Error checking index {index_name} on table {table_name}: {e}")
+        raise
 
 async def init_db():
+    global pool
+    conn = None
     try:
         logger.info('Connecting to MySQL server')
         conn = await aiomysql.connect(
@@ -37,6 +54,7 @@ async def init_db():
             await cursor.execute("CREATE DATABASE IF NOT EXISTS tests CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
 
         conn.close()
+        conn = None
         logger.info('Connecting to database tests')
         pool = await aiomysql.create_pool(**db_config)
 
@@ -116,9 +134,13 @@ async def init_db():
             await conn.commit()
             logger.info('Database initialized successfully')
 
-    except Exception as e:
+    except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
         logger.error(f'Database error: {e}')
+        raise
     finally:
-        pool.close()
-        await pool.wait_closed()
-        logger.info('Database connection closed')
+        if conn:
+            conn.close()
+        if pool:
+            pool.close()
+            await pool.wait_closed()
+            logger.info('Database connection closed')

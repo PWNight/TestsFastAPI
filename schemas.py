@@ -38,7 +38,7 @@ class QuestionSchema(Schema):
 
 class AnswerSchema(Schema):
     question_id = fields.Int(required=True)
-    answer = fields.Str(required=True)
+    answer = fields.Str(required=True, validate=lambda x: len(x) <= 200)
     answer_time = fields.Float(allow_none=True, validate=lambda x: x >= 0 if x is not None else True)
 
 user_schema = UserSchema()
