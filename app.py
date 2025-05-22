@@ -26,7 +26,7 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-app = FastAPI(title="FlaskTestsApi", version="1.1.5")
+app = FastAPI(title="TestsFastApi", version="1.1.5")
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
