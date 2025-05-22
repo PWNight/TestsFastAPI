@@ -1,7 +1,7 @@
-from flask import request
+from fastapi import Request
 
-def get_language():
-    return request.headers.get('Accept-Language', 'ru').split(',')[0]
+def get_language(request: Request):
+    return request.headers.get('accept-language', 'ru').split(',')[0]
 
 def translate_message(message, lang):
     translations = {
@@ -23,7 +23,7 @@ def translate_message(message, lang):
             'start_test': 'Начало прохождения теста',
             'submit_test': 'Отправка ответов на тест',
             'get_test_stats': 'Получение статистики по тесту',
-            'export_test_stats': 'Экспорт статистики теста в CSV'
+            'export_test_stats': 'Экспорт статистики теста'
         },
         'en': {
             'user_registered': 'User registered successfully',
@@ -43,7 +43,7 @@ def translate_message(message, lang):
             'start_test': 'Start a test',
             'submit_test': 'Submit test answers',
             'get_test_stats': 'Retrieve test statistics',
-            'export_test_stats': 'Export test statistics as CSV'
+            'export_test_stats': 'Export test statistics'
         }
     }
     return translations.get(lang, translations['ru']).get(message, message)
