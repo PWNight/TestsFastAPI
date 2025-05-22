@@ -10,11 +10,9 @@ logger = logging.getLogger('app.api_docs')
 async def api_docs(request: Request):
     lang = get_language(request)
     logger.info(f'API documentation requested, language: {lang}')
-    openapi_schema = get_openapi(
+    return get_openapi(
         title="Test Platform API",
         version="1.0.0",
         description=translate_message('api_documentation', lang),
         routes=request.app.routes
     )
-    logger.info('API documentation served successfully')
-    return openapi_schema
