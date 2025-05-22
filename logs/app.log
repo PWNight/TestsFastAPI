@@ -1,0 +1,97 @@
+2025-05-22 09:32:16,644 - app - INFO - Starting application and initializing database
+2025-05-22 09:32:23,942 - app - INFO - Starting application and initializing database
+2025-05-22 09:32:23,942 - app.db - INFO - Connecting to MySQL server
+2025-05-22 09:32:23,945 - app.db - INFO - Creating database if not exists
+2025-05-22 09:32:23,947 - app.db - INFO - Connecting to database tests
+2025-05-22 09:32:23,948 - app.db - INFO - Creating table users
+2025-05-22 09:32:23,949 - app.db - INFO - Creating table tests
+2025-05-22 09:32:23,950 - app.db - INFO - Creating table questions
+2025-05-22 09:32:23,951 - app.db - INFO - Creating table test_attempts
+2025-05-22 09:32:23,952 - app.db - INFO - Creating table answers
+2025-05-22 09:32:23,952 - app.db - INFO - Creating indexes
+2025-05-22 09:32:23,954 - app.db - INFO - Checked index idx_user_email on table users: exists
+2025-05-22 09:32:23,956 - app.db - INFO - Checked index idx_test_creator on table tests: exists
+2025-05-22 09:32:23,957 - app.db - INFO - Checked index idx_question_test on table questions: exists
+2025-05-22 09:32:23,958 - app.db - INFO - Checked index idx_attempt_user_test on table test_attempts: exists
+2025-05-22 09:32:23,958 - app.db - INFO - Database initialized successfully
+2025-05-22 09:32:23,958 - app.db - INFO - Database connection closed
+2025-05-22 09:32:30,265 - app - INFO - Starting application and initializing database
+2025-05-22 09:32:30,265 - app.db - INFO - Connecting to MySQL server
+2025-05-22 09:32:30,267 - app.db - INFO - Creating database if not exists
+2025-05-22 09:32:30,282 - app.db - INFO - Connecting to database tests
+2025-05-22 09:32:30,283 - app.db - INFO - Creating table users
+2025-05-22 09:32:30,284 - app.db - INFO - Creating table tests
+2025-05-22 09:32:30,285 - app.db - INFO - Creating table questions
+2025-05-22 09:32:30,286 - app.db - INFO - Creating table test_attempts
+2025-05-22 09:32:30,287 - app.db - INFO - Creating table answers
+2025-05-22 09:32:30,287 - app.db - INFO - Creating indexes
+2025-05-22 09:32:30,290 - app.db - INFO - Checked index idx_user_email on table users: exists
+2025-05-22 09:32:30,291 - app.db - INFO - Checked index idx_test_creator on table tests: exists
+2025-05-22 09:32:30,292 - app.db - INFO - Checked index idx_question_test on table questions: exists
+2025-05-22 09:32:30,294 - app.db - INFO - Checked index idx_attempt_user_test on table test_attempts: exists
+2025-05-22 09:32:30,294 - app.db - INFO - Database initialized successfully
+2025-05-22 09:32:30,294 - app.db - INFO - Database connection closed
+2025-05-22 09:32:36,594 - app - INFO - Starting application and initializing database
+2025-05-22 09:32:36,594 - app.db - INFO - Connecting to MySQL server
+2025-05-22 09:32:36,597 - app.db - INFO - Creating database if not exists
+2025-05-22 09:32:36,612 - app.db - INFO - Connecting to database tests
+2025-05-22 09:32:36,613 - app.db - INFO - Creating table users
+2025-05-22 09:32:36,615 - app.db - INFO - Creating table tests
+2025-05-22 09:32:36,617 - app.db - INFO - Creating table questions
+2025-05-22 09:32:36,618 - app.db - INFO - Creating table test_attempts
+2025-05-22 09:32:36,619 - app.db - INFO - Creating table answers
+2025-05-22 09:32:36,620 - app.db - INFO - Creating indexes
+2025-05-22 09:32:36,621 - app.db - INFO - Checked index idx_user_email on table users: exists
+2025-05-22 09:32:36,622 - app.db - INFO - Checked index idx_test_creator on table tests: exists
+2025-05-22 09:32:36,624 - app.db - INFO - Checked index idx_question_test on table questions: exists
+2025-05-22 09:32:36,625 - app.db - INFO - Checked index idx_attempt_user_test on table test_attempts: exists
+2025-05-22 09:32:36,625 - app.db - INFO - Database initialized successfully
+2025-05-22 09:32:36,625 - app.db - INFO - Database connection closed
+2025-05-22 09:33:01,032 - app - INFO - Starting application and initializing database
+2025-05-22 09:33:01,032 - app.db - INFO - Connecting to MySQL server
+2025-05-22 09:33:01,034 - app.db - INFO - Creating database if not exists
+2025-05-22 09:33:01,048 - app.db - INFO - Connecting to database tests
+2025-05-22 09:33:01,049 - app.db - INFO - Creating table users
+2025-05-22 09:33:01,050 - app.db - INFO - Creating table tests
+2025-05-22 09:33:01,051 - app.db - INFO - Creating table questions
+2025-05-22 09:33:01,052 - app.db - INFO - Creating table test_attempts
+2025-05-22 09:33:01,052 - app.db - INFO - Creating table answers
+2025-05-22 09:33:01,053 - app.db - INFO - Creating indexes
+2025-05-22 09:33:01,055 - app.db - INFO - Checked index idx_user_email on table users: exists
+2025-05-22 09:33:01,056 - app.db - INFO - Checked index idx_test_creator on table tests: exists
+2025-05-22 09:33:01,057 - app.db - INFO - Checked index idx_question_test on table questions: exists
+2025-05-22 09:33:01,059 - app.db - INFO - Checked index idx_attempt_user_test on table test_attempts: exists
+2025-05-22 09:33:01,059 - app.db - INFO - Database initialized successfully
+2025-05-22 09:33:01,059 - app.db - INFO - Database connection closed
+2025-05-22 09:33:27,423 - app - INFO - Starting application and initializing database
+2025-05-22 09:33:27,423 - app.db - INFO - Connecting to MySQL server
+2025-05-22 09:33:27,425 - app.db - INFO - Creating database if not exists
+2025-05-22 09:33:27,442 - app.db - INFO - Connecting to database tests
+2025-05-22 09:33:27,443 - app.db - INFO - Creating table users
+2025-05-22 09:33:27,444 - app.db - INFO - Creating table tests
+2025-05-22 09:33:27,444 - app.db - INFO - Creating table questions
+2025-05-22 09:33:27,445 - app.db - INFO - Creating table test_attempts
+2025-05-22 09:33:27,445 - app.db - INFO - Creating table answers
+2025-05-22 09:33:27,446 - app.db - INFO - Creating indexes
+2025-05-22 09:33:27,448 - app.db - INFO - Checked index idx_user_email on table users: exists
+2025-05-22 09:33:27,449 - app.db - INFO - Checked index idx_test_creator on table tests: exists
+2025-05-22 09:33:27,450 - app.db - INFO - Checked index idx_question_test on table questions: exists
+2025-05-22 09:33:27,451 - app.db - INFO - Checked index idx_attempt_user_test on table test_attempts: exists
+2025-05-22 09:33:27,451 - app.db - INFO - Database initialized successfully
+2025-05-22 09:33:27,452 - app.db - INFO - Database connection closed
+2025-05-22 09:33:34,693 - app - INFO - Starting application and initializing database
+2025-05-22 09:33:34,693 - app.db - INFO - Connecting to MySQL server
+2025-05-22 09:33:34,695 - app.db - INFO - Creating database if not exists
+2025-05-22 09:33:34,710 - app.db - INFO - Connecting to database tests
+2025-05-22 09:33:34,711 - app.db - INFO - Creating table users
+2025-05-22 09:33:34,712 - app.db - INFO - Creating table tests
+2025-05-22 09:33:34,713 - app.db - INFO - Creating table questions
+2025-05-22 09:33:34,714 - app.db - INFO - Creating table test_attempts
+2025-05-22 09:33:34,715 - app.db - INFO - Creating table answers
+2025-05-22 09:33:34,715 - app.db - INFO - Creating indexes
+2025-05-22 09:33:34,717 - app.db - INFO - Checked index idx_user_email on table users: exists
+2025-05-22 09:33:34,718 - app.db - INFO - Checked index idx_test_creator on table tests: exists
+2025-05-22 09:33:34,719 - app.db - INFO - Checked index idx_question_test on table questions: exists
+2025-05-22 09:33:34,720 - app.db - INFO - Checked index idx_attempt_user_test on table test_attempts: exists
+2025-05-22 09:33:34,720 - app.db - INFO - Database initialized successfully
+2025-05-22 09:33:34,720 - app.db - INFO - Database connection closed
