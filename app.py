@@ -3,6 +3,7 @@ import os
 from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from routes.auth import auth_router
 from routes.tests import tests_router
 from routes.test_execution import test_execution_router
@@ -20,14 +21,27 @@ log_file = os.path.join(log_dir, 'app.log')
 
 logger = logging.getLogger('app')
 logger.setLevel(logging.INFO)
+
+# Кастомный фильтр для добавления request_id по умолчанию
+class RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        if not hasattr(record, 'request_id'):
+            record.request_id = 'none'
+        return True
+
+# Форматтер логов
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - RequestID=%(request_id)s - %(message)s')
 
+# Файловый хендлер
 file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
 file_handler.setFormatter(formatter)
+file_handler.addFilter(RequestIdFilter())
 logger.addHandler(file_handler)
 
+# Консольный хендлер
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
+console_handler.addFilter(RequestIdFilter())
 logger.addHandler(console_handler)
 
 # Чтение CORS настроек из переменных окружения
@@ -55,7 +69,7 @@ app.lifespan = lifespan
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request_id = str(uuid.uuid4())
-    request.state.request_id = request_id  # Сохраняем request_id для использования в других логах
+    request.state.request_id = request_id
     logger.info(f"Request: {request.method} {request.url.path} - Query: {request.query_params}", extra={'request_id': request_id})
     try:
         response = await call_next(request)
@@ -64,6 +78,15 @@ async def log_requests(request: Request, call_next):
     except Exception as e:
         logger.error(f"Unhandled error in request: {request.method} {request.url.path} - Error: {str(e)}", extra={'request_id': request_id}, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    request_id = getattr(request.state, 'request_id', 'none')
+    logger.error(f"HTTP error: {exc.status_code} - {exc.detail}", extra={'request_id': request_id})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
 
 app.include_router(auth_router, prefix="/api/auth")
 app.include_router(tests_router, prefix="/api")
