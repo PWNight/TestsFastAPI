@@ -26,12 +26,49 @@ class TestRequest(BaseModel):
     shuffle_questions: bool = False
     questions: list[dict]
 
+class TestResponse(BaseModel):
+    id: int
+    title: str
+    description: str | None
+    question_count: int
+
+class TestListResponse(BaseModel):
+    tests: list[TestResponse]
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
         return payload['sub']
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+@tests_router.get("/tests", summary="Retrieve list of tests", response_model=TestListResponse)
+async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Depends(get_current_user)):
+    logger.info(f'Fetching tests for user ID={user_id}')
+    async with cursor:
+        try:
+            await cursor.execute("""
+                SELECT t.id, t.title, t.description, COUNT(q.id) as question_count
+                FROM tests t
+                LEFT JOIN questions q ON t.id = q.test_id
+                GROUP BY t.id, t.title, t.description
+            """)
+            tests = await cursor.fetchall()
+            if not tests:
+                logger.info('No tests found')
+                return {"tests": []}
+            test_list = [
+                TestResponse(
+                    id=test['id'],
+                    title=test['title'],
+                    description=test['description'],
+                    question_count=test['question_count']
+                ) for test in tests
+            ]
+            logger.info(f'Retrieved {len(test_list)} tests for user ID={user_id}')
+            return {"tests": test_list}
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)
 
 @tests_router.post("/tests", summary="Create a new test")
 async def create_test(request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
