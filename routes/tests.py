@@ -35,16 +35,26 @@ class TestResponse(BaseModel):
 class TestListResponse(BaseModel):
     tests: list[TestResponse]
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
         return payload['sub']
-    except Exception:
+    except jwt.ExpiredSignatureError:
+        logger.error(f"JWT token expired", extra={'request_id': request_id})
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as e:
+        logger.error(f"Invalid JWT token: {str(e)}", extra={'request_id': request_id})
         raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        logger.error(f"Unexpected error in JWT decoding: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @tests_router.get("/tests", summary="Retrieve list of tests", response_model=TestListResponse)
 async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Depends(get_current_user)):
-    logger.info(f'Fetching tests for user ID={user_id}')
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    logger.debug(f"Fetching tests for user_id={user_id}", extra={'request_id': request_id})
     async with cursor:
         try:
             await cursor.execute("""
@@ -55,7 +65,7 @@ async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Dep
             """)
             tests = await cursor.fetchall()
             if not tests:
-                logger.info('No tests found')
+                logger.info('No tests found', extra={'request_id': request_id})
                 return {"tests": []}
             test_list = [
                 TestResponse(
@@ -65,21 +75,26 @@ async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Dep
                     question_count=test['question_count']
                 ) for test in tests
             ]
-            logger.info(f'Retrieved {len(test_list)} tests for user ID={user_id}')
+            logger.info(f"Retrieved {len(test_list)} tests for user_id={user_id}", extra={'request_id': request_id})
             return {"tests": test_list}
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving tests: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @tests_router.post("/tests", summary="Create a new test")
 async def create_test(request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Create test attempt by user ID={user_id}')
+    logger.debug(f"Creating test: title={data.title}, user_id={user_id}, questions_count={len(data.questions)}", extra={'request_id': request_id})
 
     async with cursor:
         try:
-            await check_creator_permission(cursor, user_id, lang=lang)
+            await check_creator_permission(cursor, user_id, lang=lang, request_id=request_id)
             await cursor.execute("SELECT id FROM tests WHERE title = %s", (data.title,))
             if await cursor.fetchone():
+                logger.warning(f"Test title already exists: {data.title}", extra={'request_id': request_id})
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
             await cursor.execute(
@@ -92,6 +107,7 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
             for q in data.questions:
                 options = q.get('options')
                 if options and not all(isinstance(opt, str) for opt in options):
+                    logger.warning(f"Invalid options format for test_id={test_id}", extra={'request_id': request_id})
                     raise HTTPException(status_code=400, detail="Options must be a list of strings")
                 await cursor.execute(
                     "INSERT INTO questions (test_id, text, type, options, correct_answer) "
@@ -99,21 +115,26 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
                     (test_id, q['text'], q['type'], json.dumps(options) if options else None, q.get('correct_answer'))
                 )
             await cursor.connection.commit()
-            logger.info(f'Test created: ID={test_id}, Title={data.title}, Creator ID={user_id}')
+            logger.info(f"Test created: test_id={test_id}, title={data.title}, creator_id={user_id}", extra={'request_id': request_id})
             return {'test_id': test_id, 'message': translate_message('test_created', lang)}
         except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error creating test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @tests_router.put("/tests/{id}", summary="Update an existing test")
 async def update_test(id: int, request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Update test attempt for test ID={id} by user ID={user_id}')
+    logger.debug(f"Updating test: test_id={id}, user_id={user_id}, title={data.title}, questions_count={len(data.questions)}", extra={'request_id': request_id})
 
     async with cursor:
         try:
-            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
             await cursor.execute("SELECT id FROM tests WHERE title = %s AND id != %s", (data.title, id))
             if await cursor.fetchone():
+                logger.warning(f"Test title already exists: {data.title}", extra={'request_id': request_id})
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
             await cursor.execute(
@@ -126,6 +147,7 @@ async def update_test(id: int, request: Request, data: TestRequest, user_id: int
             for q in data.questions:
                 options = q.get('options')
                 if options and not all(isinstance(opt, str) for opt in options):
+                    logger.warning(f"Invalid options format for test_id={id}", extra={'request_id': request_id})
                     raise HTTPException(status_code=400, detail="Options must be a list of strings")
                 await cursor.execute(
                     "INSERT INTO questions (test_id, text, type, options, correct_answer) "
@@ -133,22 +155,29 @@ async def update_test(id: int, request: Request, data: TestRequest, user_id: int
                     (id, q['text'], q['type'], json.dumps(options) if options else None, q.get('correct_answer'))
                 )
             await cursor.connection.commit()
-            logger.info(f'Test updated: ID={id}, Title={data.title}')
+            logger.info(f"Test updated: test_id={id}, title={data.title}", extra={'request_id': request_id})
             return {'message': translate_message('test_updated', lang)}
         except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error updating test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @tests_router.delete("/tests/{id}", summary="Delete a test")
 async def delete_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Delete test attempt for test ID={id} by user ID={user_id}')
+    logger.debug(f"Deleting test: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
 
     async with cursor:
         try:
-            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
             await cursor.execute("DELETE FROM tests WHERE id = %s", (id,))
             await cursor.connection.commit()
-            logger.info(f'Test deleted: ID={id}')
+            logger.info(f"Test deleted: test_id={id}", extra={'request_id': request_id})
             return {'message': translate_message('test_deleted', lang)}
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error deleting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
