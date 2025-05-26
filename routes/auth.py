@@ -38,8 +38,11 @@ class UserResponse(BaseModel):
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
-        return payload['sub']
-    except Exception:
+        user_id = payload['sub']
+        logger.info(f'Decoded JWT for user ID={user_id}')
+        return user_id
+    except Exception as e:
+        logger.error(f'Invalid token: {e}')
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @auth_router.post("/register", summary="Register a new user")
@@ -61,8 +64,14 @@ async def register(request: Request, data: RegisterRequest, cursor=Depends(get_d
             user_id = cursor.lastrowid
             await cursor.connection.commit()
             logger.info(f'User registered: ID={user_id}, Email={data.email}, Role={data.role}')
+            # Immediately verify user exists
+            await cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+            if not await cursor.fetchone():
+                logger.error(f'User ID={user_id} not found after registration')
+                raise HTTPException(status_code=500, detail="Failed to register user")
             return {'message': translate_message('user_registered', lang), 'user_id': user_id}
         except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
+            logger.error(f'Registration error: {e}')
             raise handle_db_error(e)
 
 @auth_router.post("/login", summary="Authenticate a user")
@@ -85,6 +94,7 @@ async def login(request: Request, data: LoginRequest, cursor=Depends(get_db)):
             logger.info(f'User logged in: ID={user["id"]}, Email={data.email}')
             return {'access_token': access_token}
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            logger.error(f'Login error: {e}')
             raise handle_db_error(e)
 
 @auth_router.get("/me", summary="Get current user details", response_model=UserResponse)
@@ -99,6 +109,8 @@ async def get_user_details(request: Request, user_id: int = Depends(get_current_
             if not user:
                 logger.warning(f'User not found: ID={user_id}')
                 raise HTTPException(status_code=404, detail=translate_message('user_not_found', lang))
+            logger.info(f'User details retrieved: ID={user['id']}, Email={user['email']}, Role={user['role']}')
             return UserResponse(id=user['id'], email=user['email'], role=user['role'])
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            logger.error(f'User details error: {e}')
             raise handle_db_error(e)
