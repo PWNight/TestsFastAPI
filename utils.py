@@ -21,7 +21,8 @@ def translate_message(message: str, lang: str) -> str:
             'test_not_found': 'Тест не найден',
             'no_permission': 'Нет прав',
             'validation_error': 'Ошибка валидации',
-            'api_documentation': 'Документация API'
+            'api_documentation': 'Документация API',
+            'user_not_found': 'Пользователь не найден'
         },
         'en': {
             'user_registered': 'User registered successfully',
@@ -32,7 +33,8 @@ def translate_message(message: str, lang: str) -> str:
             'test_not_found': 'Test not found',
             'no_permission': 'No permission',
             'validation_error': 'Validation error',
-            'api_documentation': 'API documentation'
+            'api_documentation': 'API documentation',
+            'user_not_found': 'User not found'
         }
     }
     return translations.get(lang, translations['ru']).get(message, message)
