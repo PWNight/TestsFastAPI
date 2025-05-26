@@ -27,27 +27,39 @@ security = HTTPBearer()
 class SubmitRequest(BaseModel):
     answers: list[dict]
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
         return payload['sub']
-    except Exception:
+    except jwt.ExpiredSignatureError:
+        logger.error(f"JWT token expired", extra={'request_id': request_id})
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as e:
+        logger.error(f"Invalid JWT token: {str(e)}", extra={'request_id': request_id})
         raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        logger.error(f"Unexpected error in JWT decoding: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @test_execution_router.post("/tests/{id}/start", summary="Start a test")
 async def start_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Start test attempt for test ID={id} by user ID={user_id}')
+    logger.debug(f"Starting test: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
 
     async with cursor:
         try:
-            await check_participant_permission(cursor, user_id, lang)
+            await check_participant_permission(cursor, user_id, lang, request_id)
             await cursor.execute("SELECT id FROM tests WHERE id = %s", (id,))
             if not await cursor.fetchone():
+                logger.warning(f"Test not found: test_id={id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
             await cursor.execute("SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s", (user_id, id))
             if await cursor.fetchone():
+                logger.warning(f"Test already attempted: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
             await cursor.execute("INSERT INTO test_attempts (user_id, test_id) VALUES (%s, %s)", (user_id, id))
@@ -65,38 +77,46 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
                 q['options'] = json.loads(q['options']) if q['options'] else None
 
             await cursor.connection.commit()
-            logger.info(f'Test started: ID={id}, Attempt ID={attempt_id}, User ID={user_id}')
+            logger.info(f"Test started: test_id={id}, attempt_id={attempt_id}, user_id={user_id}", extra={'request_id': request_id})
             return {
                 'test_id': id,
                 'questions': [{'id': q['id'], 'text': q['text'], 'type': q['type'], 'options': q['options']} for q in questions]
             }
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error starting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @test_execution_router.post("/tests/{id}/submit", summary="Submit test answers")
 async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Submit test attempt for test ID={id} by user ID={user_id}')
+    logger.debug(f"Submitting test: test_id={id}, user_id={user_id}, answers_count={len(data.answers)}", extra={'request_id': request_id})
 
     if not data.answers:
+        logger.warning(f"No answers provided for test_id={id}, user_id={user_id}", extra={'request_id': request_id})
         raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
     async with cursor:
         try:
-            await check_participant_permission(cursor, user_id, lang)
+            await check_participant_permission(cursor, user_id, lang, request_id)
             await cursor.execute("SELECT id FROM tests WHERE id = %s", (id,))
             if not await cursor.fetchone():
+                logger.warning(f"Test not found: test_id={id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
             await cursor.execute("SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s AND end_time IS NULL", (user_id, id))
             attempt = await cursor.fetchone()
             if not attempt:
+                logger.warning(f"No active attempt found: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
             question_ids = [ans['question_id'] for ans in data.answers]
             await cursor.execute("SELECT id FROM questions WHERE test_id = %s AND id IN %s", (id, tuple(question_ids) if question_ids else (0,)))
             valid_question_ids = {q['id'] for q in await cursor.fetchall()}
             if set(question_ids) - valid_question_ids:
+                logger.warning(f"Invalid question IDs provided: {set(question_ids) - valid_question_ids}", extra={'request_id': request_id})
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
             await cursor.execute("SELECT COUNT(*) as count FROM questions WHERE test_id = %s", (id,))
@@ -108,6 +128,7 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                 await cursor.execute("SELECT correct_answer, test_id FROM questions WHERE id = %s", (ans['question_id'],))
                 question = await cursor.fetchone()
                 if not question or question['test_id'] != id:
+                    logger.warning(f"Invalid question: question_id={ans['question_id']}, test_id={id}", extra={'request_id': request_id})
                     raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
                 is_correct = (ans['answer'] == question['correct_answer'])
@@ -127,19 +148,23 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                 (final_score, datetime.datetime.now(datetime.UTC), attempt['id'])
             )
             await cursor.connection.commit()
-            logger.info(f'Test submitted: ID={id}, Attempt ID={attempt["id"]}, User ID={user_id}, Score={final_score}')
+            logger.info(f"Test submitted: test_id={id}, attempt_id={attempt['id']}, user_id={user_id}, score={final_score}", extra={'request_id': request_id})
             return {'score': final_score, 'correct_answers': correct_answers}
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error submitting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @test_execution_router.get("/tests/{id}/stats", summary="Retrieve test statistics")
 async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Retrieve stats for test ID={id} by user ID={user_id}')
+    logger.debug(f"Retrieving stats: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
 
     async with cursor:
         try:
-            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
             await cursor.execute("SELECT AVG(score) as avg_score FROM test_attempts WHERE test_id = %s", (id,))
             avg_score = (await cursor.fetchone())['avg_score'] or 0
 
@@ -166,25 +191,31 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
                         'average_time': stats['avg_time'] or 0
                     }
 
+            logger.info(f"Stats retrieved: test_id={id}, avg_score={avg_score}, avg_completion_time={avg_completion_time}", extra={'request_id': request_id})
             return {
                 'average_score': round(avg_score, 1),
                 'completion_time': round(avg_completion_time, 1),
                 'difficulty': difficulty
             }
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving stats: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 @test_execution_router.get("/tests/{id}/stats/export", summary="Export test statistics")
 async def export_stats(id: int, request: Request, format: str = "csv", user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = getattr(request.state, 'request_id', 'unknown')
     lang = get_language(request)
-    logger.info(f'Export stats for test ID={id} by user ID={user_id}, format={format}')
+    logger.debug(f"Exporting stats: test_id={id}, user_id={user_id}, format={format}", extra={'request_id': request_id})
 
     if format not in ['csv', 'json', 'excel']:
+        logger.warning(f"Invalid format requested: {format}", extra={'request_id': request_id})
         raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
     async with cursor:
         try:
-            await check_creator_permission(cursor, user_id, test_id=id, lang=lang)
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
             await cursor.execute(
                 "SELECT user_id, score, start_time, end_time, "
                 "TIMESTAMPDIFF(SECOND, start_time, end_time) as completion_time "
@@ -203,6 +234,7 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
                 } for attempt in attempts
             ]
 
+            logger.info(f"Stats exported: test_id={id}, format={format}, records={len(data)}", extra={'request_id': request_id})
             if format == "json":
                 return data
             elif format == "excel":
@@ -224,4 +256,7 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
                     headers={"Content-Disposition": f"attachment; filename=test_{id}_stats.csv"}
                 )
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-            raise handle_db_error(e)
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error exporting stats: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
