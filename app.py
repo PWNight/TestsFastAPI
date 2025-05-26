@@ -30,7 +30,7 @@ class RequestIdFilter(logging.Filter):
         return True
 
 # Форматтер логов
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - RequestID=%(request_id)s - %(message)s')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - RequestID = %(request_id)s - %(message)s')
 
 # Файловый хендлер
 file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
