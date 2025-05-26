@@ -8,6 +8,7 @@ from db import get_db
 from utils import get_language, translate_message, handle_db_error
 from datetime import datetime, timedelta
 import os
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,6 +19,7 @@ if not JWT_SECRET_KEY:
 
 auth_router = APIRouter()
 logger = logging.getLogger('app.auth')
+security = HTTPBearer()
 
 class RegisterRequest(BaseModel):
     email: str
@@ -27,6 +29,18 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    role: str
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
+        return payload['sub']
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 @auth_router.post("/register", summary="Register a new user")
 async def register(request: Request, data: RegisterRequest, cursor=Depends(get_db)):
@@ -70,5 +84,21 @@ async def login(request: Request, data: LoginRequest, cursor=Depends(get_db)):
             )
             logger.info(f'User logged in: ID={user["id"]}, Email={data.email}')
             return {'access_token': access_token}
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise handle_db_error(e)
+
+@auth_router.get("/me", summary="Get current user details", response_model=UserResponse)
+async def get_user_details(request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    lang = get_language(request)
+    logger.info(f'Fetching details for user ID={user_id}')
+
+    async with cursor:
+        try:
+            await cursor.execute("SELECT id, email, role FROM users WHERE id = %s", (user_id,))
+            user = await cursor.fetchone()
+            if not user:
+                logger.warning(f'User not found: ID={user_id}')
+                raise HTTPException(status_code=404, detail=translate_message('user_not_found', lang))
+            return UserResponse(id=user['id'], email=user['email'], role=user['role'])
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise handle_db_error(e)
