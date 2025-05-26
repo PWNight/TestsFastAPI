@@ -2,15 +2,15 @@ from fastapi import Request, HTTPException
 import logging
 import aiomysql
 
-# Получаем логгер из утилит
 logger = logging.getLogger('app.utils')
 
-# Ф-ия получения языка из заголовка запроса
 def get_language(request: Request) -> str:
-    return request.headers.get('accept-language', 'ru').split(',')[0]
+    lang = request.headers.get('accept-language', 'ru').split(',')[0]
+    logger.debug(f"Extracted language from request: {lang}", extra={'request_id': getattr(request.state, 'request_id', 'unknown')})
+    return lang
 
-# Ф-ия получения переведённого сообщения
 def translate_message(message: str, lang: str) -> str:
+    logger.debug(f"Translating message: {message} for language: {lang}", extra={'request_id': 'unknown'})
     translations = {
         'ru': {
             'user_registered': 'Пользователь успешно зарегистрирован',
@@ -37,37 +37,48 @@ def translate_message(message: str, lang: str) -> str:
             'user_not_found': 'User not found'
         }
     }
-    return translations.get(lang, translations['ru']).get(message, message)
+    translated = translations.get(lang, translations['ru']).get(message, message)
+    logger.debug(f"Translated message: {translated}")
+    return translated
 
-# Ф-ия обработки ошибок БД
-async def handle_db_error(e: Exception) -> HTTPException:
-    logger.error(f"Database error: {e}")
+async def handle_db_error(e: Exception, request_id: str = 'unknown') -> HTTPException:
+    logger.error(f"Database error: {str(e)}", extra={'request_id': request_id}, exc_info=True)
     if isinstance(e, aiomysql.OperationalError):
         return HTTPException(status_code=503, detail="Database unavailable")
-    return HTTPException(status_code=500, detail="Database error")
+    elif isinstance(e, aiomysql.IntegrityError):
+        return HTTPException(status_code=400, detail="Database integrity error")
+    return HTTPException(status_code=500, detail="Internal database error")
 
-# Ф-ия проверки прав создателя на тест
-async def check_creator_permission(cursor, user_id: int, test_id: int | None = None, lang: str = 'ru'):
-    await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-    user = await cursor.fetchone()
+async def check_creator_permission(cursor, user_id: int, test_id: int | None = None, lang: str = 'ru', request_id: str = 'unknown'):
+    logger.debug(f"Checking creator permission for user_id={user_id}, test_id={test_id}", extra={'request_id': request_id})
+    try:
+        await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        user = await cursor.fetchone()
 
-    if not user or user['role'] != 'creator':
-        logger.warning(f'No permission: User ID={user_id} is not a creator')
-        raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
+        if not user or user['role'] != 'creator':
+            logger.warning(f"No permission: User ID={user_id} is not a creator", extra={'request_id': request_id})
+            raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
-    if test_id:
-        await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (test_id,))
-        test = await cursor.fetchone()
+        if test_id:
+            await cursor.execute("SELECT creator_id FROM tests WHERE id = %s", (test_id,))
+            test = await cursor.fetchone()
 
-        if not test or test['creator_id'] != user_id:
-            logger.warning(f'Test not found or not owned by user ID={user_id}, Test ID={test_id}')
-            raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
+            if not test or test['creator_id'] != user_id:
+                logger.warning(f"Test not found or not owned by user ID={user_id}, Test ID={test_id}", extra={'request_id': request_id})
+                raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
+    except Exception as e:
+        logger.error(f"Error checking creator permission: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+        raise
 
-# Ф-ия проверки прав участника на тест
-async def check_participant_permission(cursor, user_id: int, lang: str):
-    await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
-    user = await cursor.fetchone()
+async def check_participant_permission(cursor, user_id: int, lang: str, request_id: str = 'unknown'):
+    logger.debug(f"Checking participant permission for user_id={user_id}", extra={'request_id': request_id})
+    try:
+        await cursor.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        user = await cursor.fetchone()
 
-    if not user or user['role'] != 'participant':
-        logger.warning(f'No permission: User ID={user_id} is not a participant')
-        raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
+        if not user or user['role'] != 'participant':
+            logger.warning(f"No permission: User ID={user_id} is not a participant", extra={'request_id': request_id})
+            raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
+    except Exception as e:
+        logger.error(f"Error checking participant permission: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+        raise
