@@ -10,11 +10,11 @@ logger = logging.getLogger('app.db')
 logger.setLevel(logging.INFO)
 
 db_config = {
-    'host': os.getenv('DB_HOST', os.getenv('DB_HOST')),
-    'user': os.getenv('DB_USER', os.getenv('DB_USER')),
-    'password': os.getenv('DB_PASSWORD', os.getenv('DB_PASSWORD')),
-    'db': os.getenv('DB_NAME', os.getenv('DB_NAME')),
-    'charset': os.getenv('DB_CHARSET', os.getenv('DB_CHARSET')),
+    'host': os.getenv('DB_HOST'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'db': os.getenv('DB_NAME'),
+    'charset': os.getenv('DB_CHARSET', 'utf8mb4'),
     'cursorclass': aiomysql.DictCursor
 }
 
@@ -23,7 +23,12 @@ pool = None
 async def get_db():
     global pool
     if pool is None:
-        pool = await aiomysql.create_pool(**db_config)
+        try:
+            logger.info("Creating database connection pool")
+            pool = await aiomysql.create_pool(**db_config)
+        except Exception as e:
+            logger.error(f"Failed to create database pool: {str(e)}", exc_info=True)
+            raise
     async with pool.acquire() as conn:
         async with conn.cursor() as cursor:
             yield cursor
@@ -32,7 +37,12 @@ async def init_db():
     global pool
     try:
         logger.info('Connecting to MySQL server')
-        async with aiomysql.connect(host=db_config['host'], user=db_config['user'], password=db_config['password'], charset=db_config['charset']) as conn:
+        async with aiomysql.connect(
+            host=db_config['host'],
+            user=db_config['user'],
+            password=db_config['password'],
+            charset=db_config['charset']
+        ) as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute("CREATE DATABASE IF NOT EXISTS tests CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
 
@@ -101,8 +111,9 @@ async def init_db():
                 """)
                 await conn.commit()
                 logger.info('Database initialized successfully')
-    except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
-        raise handle_db_error(e)
+    except Exception as e:
+        logger.error(f"Error initializing database: {str(e)}", exc_info=True)
+        raise await handle_db_error(e)
     finally:
         if pool:
             pool.close()
