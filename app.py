@@ -2,6 +2,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware  # Импортируем CORSMiddleware
 from routes.auth import auth_router
 from routes.tests import tests_router
 from routes.test_execution import test_execution_router
@@ -27,6 +28,15 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 app = FastAPI(title="TestsFastApi", version="1.1.5")
+
+# Настройка CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Разрешённый источник (фронтенд)
+    allow_credentials=True,
+    allow_methods=["*"],  # Разрешить все методы (GET, POST, и т.д.)
+    allow_headers=["*"],  # Разрешить все заголовки
+)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
