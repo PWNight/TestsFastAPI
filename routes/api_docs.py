@@ -12,7 +12,7 @@ async def api_docs(request: Request):
     logger.info(f'API documentation requested, language: {lang}')
     return get_openapi(
         title="TestsFastApi",
-        version="1.1.5",
+        version="1.2.0",
         description=translate_message('api_documentation', lang),
         routes=request.app.routes
     )

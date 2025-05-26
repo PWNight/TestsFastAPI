@@ -27,7 +27,7 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-app = FastAPI(title="TestsFastApi", version="1.1.5")
+app = FastAPI(title="TestsFastApi", version="1.2.0")
 
 # Настройка CORS
 app.add_middleware(
