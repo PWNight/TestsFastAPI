@@ -27,25 +27,25 @@ security = HTTPBearer()
 class SubmitRequest(BaseModel):
     answers: list[dict]
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+async def get_current_user(credentials: HTTPAuthorizationCredentials, request: Request = None):
+    request_id = request.state.request_id if request else 'unknown'
     logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
         return payload['sub']
     except jwt.ExpiredSignatureError:
-        logger.error(f"JWT token expired", extra={'request_id': request_id})
+        logger.error(f"JWT expired", extra={'request_id': request_id})
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError as e:
-        logger.error(f"Invalid JWT token: {str(e)}", extra={'request_id': request_id})
+        logger.error(f"Invalid JWT: {str(e)}", extra={'request_id': request_id})
         raise HTTPException(status_code=401, detail="Invalid token")
     except Exception as e:
-        logger.error(f"Unexpected error in JWT decoding: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+        logger.error(f"JWT decode error: {str(e)}", extra={'request_id': request_id}, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @test_execution_router.post("/tests/{id}/start", summary="Start a test")
 async def start_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Starting test: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
 
@@ -82,6 +82,8 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
                 'test_id': id,
                 'questions': [{'id': q['id'], 'text': q['text'], 'type': q['type'], 'options': q['options']} for q in questions]
             }
+        except HTTPException:
+            raise
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
@@ -90,7 +92,7 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
 
 @test_execution_router.post("/tests/{id}/submit", summary="Submit test answers")
 async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Submitting test: test_id={id}, user_id={user_id}, answers_count={len(data.answers)}", extra={'request_id': request_id})
 
@@ -102,7 +104,8 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
         try:
             await check_participant_permission(cursor, user_id, lang, request_id)
             await cursor.execute("SELECT id FROM tests WHERE id = %s", (id,))
-            if not await cursor.fetchone():
+            test = await cursor.fetchone()
+            if not test:
                 logger.warning(f"Test not found: test_id={id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
@@ -150,6 +153,8 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
             await cursor.connection.commit()
             logger.info(f"Test submitted: test_id={id}, attempt_id={attempt['id']}, user_id={user_id}, score={final_score}", extra={'request_id': request_id})
             return {'score': final_score, 'correct_answers': correct_answers}
+        except HTTPException:
+            raise
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
@@ -158,7 +163,7 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
 
 @test_execution_router.get("/tests/{id}/stats", summary="Retrieve test statistics")
 async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Retrieving stats: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
 
@@ -205,7 +210,7 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
 
 @test_execution_router.get("/tests/{id}/stats/export", summary="Export test statistics")
 async def export_stats(id: int, request: Request, format: str = "csv", user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Exporting stats: test_id={id}, user_id={user_id}, format={format}", extra={'request_id': request_id})
 
@@ -255,6 +260,8 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
                     media_type="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=test_{id}_stats.csv"}
                 )
+        except HTTPException:
+            raise
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:

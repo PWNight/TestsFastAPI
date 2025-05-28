@@ -32,11 +32,19 @@ class TestResponse(BaseModel):
     description: str | None
     question_count: int
 
+class TestDetailResponse(BaseModel):
+    id: int
+    title: str
+    description: str | None
+    time_limit: int | None
+    shuffle_questions: bool
+    questions: list[dict]
+
 class TestListResponse(BaseModel):
     tests: list[TestResponse]
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id if request else 'unknown'
     logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
@@ -53,7 +61,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 @tests_router.get("/tests", summary="Retrieve list of tests", response_model=TestListResponse)
 async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Depends(get_current_user)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     logger.debug(f"Fetching tests for user_id={user_id}", extra={'request_id': request_id})
     async with cursor:
         try:
@@ -83,9 +91,53 @@ async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Dep
             logger.error(f"Unexpected error retrieving tests: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
+@tests_router.get("/tests/{id}", summary="Retrieve test details", response_model=TestDetailResponse)
+async def get_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = request.state.request_id
+    lang = get_language(request)
+    logger.debug(f"Fetching test details: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
+
+    async with cursor:
+        try:
+            await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
+            await cursor.execute("SELECT id, title, description, time_limit, shuffle_questions FROM tests WHERE id = %s", (id,))
+            test = await cursor.fetchone()
+            if not test:
+                logger.warning(f"Test not found: test_id={id}", extra={'request_id': request_id})
+                raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
+
+            await cursor.execute("SELECT id, text, type, options, correct_answer FROM questions WHERE test_id = %s", (id,))
+            questions = await cursor.fetchall()
+            question_list = [
+                {
+                    "id": q['id'],
+                    "text": q['text'],
+                    "type": q['type'],
+                    "options": json.loads(q['options']) if q['options'] else None,
+                    "correct_answer": q['correct_answer']
+                } for q in questions
+            ]
+
+            logger.info(f"Test details retrieved: test_id={id}, title={test['title']}, questions_count={len(questions)}", extra={'request_id': request_id})
+            return TestDetailResponse(
+                id=test['id'],
+                title=test['title'],
+                description=test['description'],
+                time_limit=test['time_limit'],
+                shuffle_questions=test['shuffle_questions'],
+                questions=question_list
+            )
+        except HTTPException:
+            raise
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
+
 @tests_router.post("/tests", summary="Create a new test")
 async def create_test(request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Creating test: title={data.title}, user_id={user_id}, questions_count={len(data.questions)}", extra={'request_id': request_id})
 
@@ -117,7 +169,9 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
             await cursor.connection.commit()
             logger.info(f"Test created: test_id={test_id}, title={data.title}, creator_id={user_id}", extra={'request_id': request_id})
             return {'test_id': test_id, 'message': translate_message('test_created', lang)}
-        except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
+        except HTTPException:
+            raise
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
             logger.error(f"Unexpected error creating test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
@@ -125,7 +179,7 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
 
 @tests_router.put("/tests/{id}", summary="Update an existing test")
 async def update_test(id: int, request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Updating test: test_id={id}, user_id={user_id}, title={data.title}, questions_count={len(data.questions)}", extra={'request_id': request_id})
 
@@ -157,7 +211,9 @@ async def update_test(id: int, request: Request, data: TestRequest, user_id: int
             await cursor.connection.commit()
             logger.info(f"Test updated: test_id={id}, title={data.title}", extra={'request_id': request_id})
             return {'message': translate_message('test_updated', lang)}
-        except (aiomysql.IntegrityError, aiomysql.OperationalError) as e:
+        except HTTPException:
+            raise
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
             logger.error(f"Unexpected error updating test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
@@ -165,7 +221,7 @@ async def update_test(id: int, request: Request, data: TestRequest, user_id: int
 
 @tests_router.delete("/tests/{id}", summary="Delete a test")
 async def delete_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
-    request_id = getattr(request.state, 'request_id', 'unknown')
+    request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Deleting test: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
 
@@ -176,6 +232,8 @@ async def delete_test(id: int, request: Request, user_id: int = Depends(get_curr
             await cursor.connection.commit()
             logger.info(f"Test deleted: test_id={id}", extra={'request_id': request_id})
             return {'message': translate_message('test_deleted', lang)}
+        except HTTPException:
+            raise
         except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:

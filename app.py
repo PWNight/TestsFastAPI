@@ -14,7 +14,6 @@ from contextlib import asynccontextmanager
 
 load_dotenv()
 
-# Конфигурация логирования
 log_dir = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'app.log')
@@ -22,34 +21,28 @@ log_file = os.path.join(log_dir, 'app.log')
 logger = logging.getLogger('app')
 logger.setLevel(logging.INFO)
 
-# Кастомный фильтр для добавления request_id по умолчанию
 class RequestIdFilter(logging.Filter):
     def filter(self, record):
         if not hasattr(record, 'request_id'):
             record.request_id = 'none'
         return True
 
-# Форматтер логов
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - RequestID = %(request_id)s - %(message)s')
 
-# Файловый хендлер
 file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
 file_handler.setFormatter(formatter)
 file_handler.addFilter(RequestIdFilter())
 logger.addHandler(file_handler)
 
-# Консольный хендлер
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 console_handler.addFilter(RequestIdFilter())
 logger.addHandler(console_handler)
 
-# Чтение CORS настроек из переменных окружения
 ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
 
 app = FastAPI(title="TestsFastApi", version="1.2.0")
 
-# Настройка CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -76,8 +69,8 @@ async def log_requests(request: Request, call_next):
         logger.info(f"Response: {request.method} {request.url.path} - Status: {response.status_code}", extra={'request_id': request_id})
         return response
     except Exception as e:
-        logger.error(f"Unhandled error in request: {request.method} {request.url.path} - Error: {str(e)}", extra={'request_id': request_id}, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Unhandled error: {request.method} {request.url.path} - Error: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+        raise
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
