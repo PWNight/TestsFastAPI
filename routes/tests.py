@@ -91,6 +91,39 @@ async def get_tests(request: Request, cursor=Depends(get_db), user_id: int = Dep
             logger.error(f"Unexpected error retrieving tests: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
+@tests_router.get("/tests/me", summary="Retrieve list of tests created by the current user", response_model=TestListResponse)
+async def get_my_tests(request: Request, cursor=Depends(get_db), user_id: int = Depends(get_current_user)):
+    request_id = request.state.request_id
+    logger.debug(f"Fetching tests created by user_id={user_id}", extra={'request_id': request_id})
+    async with cursor:
+        try:
+            await cursor.execute("""
+                SELECT t.id, t.title, t.description, COUNT(q.id) as question_count
+                FROM tests t
+                LEFT JOIN questions q ON t.id = q.test_id
+                WHERE t.creator_id = %s
+                GROUP BY t.id, t.title, t.description
+            """, (user_id,))
+            tests = await cursor.fetchall()
+            if not tests:
+                logger.info(f"No tests found for user_id={user_id}", extra={'request_id': request_id})
+                return {"tests": []}
+            test_list = [
+                TestResponse(
+                    id=test['id'],
+                    title=test['title'],
+                    description=test['description'],
+                    question_count=test['question_count']
+                ) for test in tests
+            ]
+            logger.info(f"Retrieved {len(test_list)} tests for user_id={user_id}", extra={'request_id': request_id})
+            return {"tests": test_list}
+        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving user tests: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
+
 @tests_router.get("/tests/{id}", summary="Retrieve test details", response_model=TestDetailResponse)
 async def get_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
     request_id = request.state.request_id
@@ -177,7 +210,7 @@ async def create_test(request: Request, data: TestRequest, user_id: int = Depend
             logger.error(f"Unexpected error creating test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
-@tests_router.put("/tests/{id}", summary="Update an existing test")
+@tests_router.patch("/tests/{id}", summary="Update an existing test")
 async def update_test(id: int, request: Request, data: TestRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
     request_id = request.state.request_id
     lang = get_language(request)
@@ -228,6 +261,7 @@ async def delete_test(id: int, request: Request, user_id: int = Depends(get_curr
     async with cursor:
         try:
             await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
+            await cursor.execute("DELETE FROM questions WHERE test_id = %s", (id,))
             await cursor.execute("DELETE FROM tests WHERE id = %s", (id,))
             await cursor.connection.commit()
             logger.info(f"Test deleted: test_id={id}", extra={'request_id': request_id})

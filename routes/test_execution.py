@@ -27,7 +27,12 @@ security = HTTPBearer()
 class SubmitRequest(BaseModel):
     answers: list[dict]
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials, request: Request = None):
+class StatsResponse(BaseModel):
+    average_score: float
+    completion_time: float
+    difficulty: dict[str, dict[str, float]]
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
     request_id = request.state.request_id if request else 'unknown'
     logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
     try:
@@ -57,11 +62,6 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
                 logger.warning(f"Test not found: test_id={id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
-            await cursor.execute("SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s", (user_id, id))
-            if await cursor.fetchone():
-                logger.warning(f"Test already attempted: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
-                raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
-
             await cursor.execute("INSERT INTO test_attempts (user_id, test_id) VALUES (%s, %s)", (user_id, id))
             attempt_id = cursor.lastrowid
 
@@ -84,7 +84,7 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
             }
         except HTTPException:
             raise
-        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+        except (aiomysql.OperationalError, aiomysql.Error) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
             logger.error(f"Unexpected error starting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
@@ -139,15 +139,21 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                     score += 1
 
                 await cursor.execute(
-                    "INSERT INTO answers (attempt_id, question_id, answer, is_correct, answer_time) "
-                    "VALUES (%s, %s, %s, %s, %s)",
+                    """
+                    INSERT INTO answers (attempt_id, question_id, answer, is_correct, answer_time) 
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
                     (attempt['id'], ans['question_id'], ans['answer'], is_correct, ans.get('answer_time', 0))
                 )
                 correct_answers.append({'question_id': ans['question_id'], 'correct_answer': question['correct_answer']})
 
             final_score = (score / total_questions) * 100 if total_questions > 0 else 0
             await cursor.execute(
-                "UPDATE test_attempts SET score = %s, end_time = %s WHERE id = %s",
+                """
+                UPDATE test_attempts 
+                SET score = %s, end_time = %s 
+                WHERE id = %s
+                """,
                 (final_score, datetime.datetime.now(datetime.UTC), attempt['id'])
             )
             await cursor.connection.commit()
@@ -155,27 +161,41 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
             return {'score': final_score, 'correct_answers': correct_answers}
         except HTTPException:
             raise
-        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+        except (aiomysql.OperationalError, aiomysql.Error) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
             logger.error(f"Unexpected error submitting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
-@test_execution_router.get("/tests/{id}/stats", summary="Retrieve test statistics")
+@test_execution_router.get("/tests/{id}/stats", summary="Retrieve test statistics", response_model=StatsResponse)
 async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
     request_id = request.state.request_id
     lang = get_language(request)
-    logger.debug(f"Retrieving stats: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
+    logger.debug(f"Retrieving stats: test_id={id}, user_id={user_id}, method={request.method}, headers={dict(request.headers)}", extra={'request_id': request_id})
 
     async with cursor:
         try:
+            # Validate test_id
+            if not isinstance(id, int) or id <= 0:
+                logger.warning(f"Invalid test ID: {id}", extra={'request_id': request_id})
+                raise HTTPException(status_code=422, detail=translate_message('validation_error', lang))
+
+            # Explicitly check for body
+            body = await request.body()
+            if body:
+                logger.warning(f"Unexpected body in GET request: {body.decode()}", extra={'request_id': request_id})
+                raise HTTPException(status_code=400, detail="GET requests must not include a body")
+
             await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
             await cursor.execute("SELECT AVG(score) as avg_score FROM test_attempts WHERE test_id = %s", (id,))
             avg_score = (await cursor.fetchone())['avg_score'] or 0
 
             await cursor.execute(
-                "SELECT AVG(TIMESTAMPDIFF(SECOND, start_time, end_time)) as avg_time "
-                "FROM test_attempts WHERE test_id = %s AND end_time IS NOT NULL",
+                """
+                SELECT AVG(TIMESTAMPDIFF(SECOND, start_time, end_time)) as avg_time 
+                FROM test_attempts 
+                WHERE test_id = %s AND end_time IS NOT NULL
+                """,
                 (id,)
             )
             avg_completion_time = (await cursor.fetchone())['avg_time'] or 0
@@ -185,8 +205,11 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
             difficulty = {}
             for q in questions:
                 await cursor.execute(
-                    "SELECT COUNT(*) as total, SUM(is_correct) as correct, AVG(answer_time) as avg_time "
-                    "FROM answers WHERE question_id = %s",
+                    """
+                    SELECT COUNT(*) as total, SUM(is_correct) as correct, AVG(answer_time) as avg_time 
+                    FROM answers 
+                    WHERE question_id = %s
+                    """,
                     (q['id'],)
                 )
                 stats = await cursor.fetchone()
@@ -202,7 +225,10 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
                 'completion_time': round(avg_completion_time, 1),
                 'difficulty': difficulty
             }
-        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+        except HTTPException as e:
+            logger.error(f"Error retrieving stats: {e.status_code} - {e.detail}", extra={'request_id': request_id})
+            raise
+        except (aiomysql.OperationalError, aiomysql.Error) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
             logger.error(f"Unexpected error retrieving stats: {str(e)}", extra={'request_id': request_id}, exc_info=True)
@@ -220,11 +246,19 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
 
     async with cursor:
         try:
+            # Validate test_id
+            if not isinstance(id, int) or id <= 0:
+                logger.warning(f"Invalid test ID: {id}", extra={'request_id': request_id})
+                raise HTTPException(status_code=422, detail=translate_message('validation_error', lang))
+
             await check_creator_permission(cursor, user_id, test_id=id, lang=lang, request_id=request_id)
             await cursor.execute(
-                "SELECT user_id, score, start_time, end_time, "
-                "TIMESTAMPDIFF(SECOND, start_time, end_time) as completion_time "
-                "FROM test_attempts WHERE test_id = %s",
+                """
+                SELECT user_id, score, start_time, end_time, 
+                TIMESTAMPDIFF(SECOND, start_time, end_time) as completion_time 
+                FROM test_attempts 
+                WHERE test_id = %s
+                """,
                 (id,)
             )
             attempts = await cursor.fetchall()
@@ -260,9 +294,10 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
                     media_type="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=test_{id}_stats.csv"}
                 )
-        except HTTPException:
+        except HTTPException as e:
+            logger.error(f"Error exporting stats: {e.status_code} - {e.detail}", extra={'request_id': request_id})
             raise
-        except (aiomysql.OperationalError, aiomysql.IntegrityError) as e:
+        except (aiomysql.OperationalError, aiomysql.Error) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
             logger.error(f"Unexpected error exporting stats: {str(e)}", extra={'request_id': request_id}, exc_info=True)
