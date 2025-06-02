@@ -8,7 +8,8 @@ import pandas as pd
 from io import BytesIO
 import logging
 from db import get_db
-from utils import get_language, translate_message, handle_db_error, check_creator_permission, check_participant_permission
+from utils import get_language, translate_message, handle_db_error, check_creator_permission, \
+    check_participant_permission
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 import os
@@ -22,18 +23,33 @@ if not JWT_SECRET_KEY:
 
 test_execution_router = APIRouter()
 logger = logging.getLogger('app.test_execution')
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
+
 
 class SubmitRequest(BaseModel):
     answers: list[dict]
+
 
 class StatsResponse(BaseModel):
     average_score: float
     completion_time: float
     difficulty: dict[str, dict[str, float]]
 
+
+class TestResultResponse(BaseModel):
+    test_id: int
+    test_title: str
+    start_time: str
+    end_time: str
+    score: float
+
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
     request_id = request.state.request_id if request else 'unknown'
+    if not credentials or not credentials.credentials:
+        logger.error("Missing Authorization header", extra={'request_id': request_id})
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
     logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=['HS256'])
@@ -77,10 +93,12 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
                 q['options'] = json.loads(q['options']) if q['options'] else None
 
             await cursor.connection.commit()
-            logger.info(f"Test started: test_id={id}, attempt_id={attempt_id}, user_id={user_id}", extra={'request_id': request_id})
+            logger.info(f"Test started: test_id={id}, attempt_id={attempt_id}, user_id={user_id}",
+                        extra={'request_id': request_id})
             return {
                 'test_id': id,
-                'questions': [{'id': q['id'], 'text': q['text'], 'type': q['type'], 'options': q['options']} for q in questions]
+                'questions': [{'id': q['id'], 'text': q['text'], 'type': q['type'], 'options': q['options']} for q in
+                              questions]
             }
         except HTTPException:
             raise
@@ -90,11 +108,14 @@ async def start_test(id: int, request: Request, user_id: int = Depends(get_curre
             logger.error(f"Unexpected error starting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @test_execution_router.post("/tests/{id}/submit", summary="Submit test answers")
-async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: int = Depends(get_current_user),
+                      cursor=Depends(get_db)):
     request_id = request.state.request_id
     lang = get_language(request)
-    logger.debug(f"Submitting test: test_id={id}, user_id={user_id}, answers_count={len(data.answers)}", extra={'request_id': request_id})
+    logger.debug(f"Submitting test: test_id={id}, user_id={user_id}, answers_count={len(data.answers)}",
+                 extra={'request_id': request_id})
 
     if not data.answers:
         logger.warning(f"No answers provided for test_id={id}, user_id={user_id}", extra={'request_id': request_id})
@@ -109,17 +130,21 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                 logger.warning(f"Test not found: test_id={id}", extra={'request_id': request_id})
                 raise HTTPException(status_code=404, detail=translate_message('test_not_found', lang))
 
-            await cursor.execute("SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s AND end_time IS NULL", (user_id, id))
+            await cursor.execute(
+                "SELECT id FROM test_attempts WHERE user_id = %s AND test_id = %s AND end_time IS NULL", (user_id, id))
             attempt = await cursor.fetchone()
             if not attempt:
-                logger.warning(f"No active attempt found: test_id={id}, user_id={user_id}", extra={'request_id': request_id})
+                logger.warning(f"No active attempt found: test_id={id}, user_id={user_id}",
+                               extra={'request_id': request_id})
                 raise HTTPException(status_code=403, detail=translate_message('no_permission', lang))
 
             question_ids = [ans['question_id'] for ans in data.answers]
-            await cursor.execute("SELECT id FROM questions WHERE test_id = %s AND id IN %s", (id, tuple(question_ids) if question_ids else (0,)))
+            await cursor.execute("SELECT id FROM questions WHERE test_id = %s AND id IN %s",
+                                 (id, tuple(question_ids) if question_ids else (0,)))
             valid_question_ids = {q['id'] for q in await cursor.fetchall()}
             if set(question_ids) - valid_question_ids:
-                logger.warning(f"Invalid question IDs provided: {set(question_ids) - valid_question_ids}", extra={'request_id': request_id})
+                logger.warning(f"Invalid question IDs provided: {set(question_ids) - valid_question_ids}",
+                               extra={'request_id': request_id})
                 raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
             await cursor.execute("SELECT COUNT(*) as count FROM questions WHERE test_id = %s", (id,))
@@ -128,10 +153,12 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
             score = 0
             correct_answers = []
             for ans in data.answers:
-                await cursor.execute("SELECT correct_answer, test_id FROM questions WHERE id = %s", (ans['question_id'],))
+                await cursor.execute("SELECT correct_answer, test_id FROM questions WHERE id = %s",
+                                     (ans['question_id'],))
                 question = await cursor.fetchone()
                 if not question or question['test_id'] != id:
-                    logger.warning(f"Invalid question: question_id={ans['question_id']}, test_id={id}", extra={'request_id': request_id})
+                    logger.warning(f"Invalid question: question_id={ans['question_id']}, test_id={id}",
+                                   extra={'request_id': request_id})
                     raise HTTPException(status_code=400, detail=translate_message('validation_error', lang))
 
                 is_correct = (ans['answer'] == question['correct_answer'])
@@ -145,7 +172,8 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                     """,
                     (attempt['id'], ans['question_id'], ans['answer'], is_correct, ans.get('answer_time', 0))
                 )
-                correct_answers.append({'question_id': ans['question_id'], 'correct_answer': question['correct_answer']})
+                correct_answers.append(
+                    {'question_id': ans['question_id'], 'correct_answer': question['correct_answer']})
 
             final_score = (score / total_questions) * 100 if total_questions > 0 else 0
             await cursor.execute(
@@ -157,7 +185,9 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
                 (final_score, datetime.datetime.now(datetime.UTC), attempt['id'])
             )
             await cursor.connection.commit()
-            logger.info(f"Test submitted: test_id={id}, attempt_id={attempt['id']}, user_id={user_id}, score={final_score}", extra={'request_id': request_id})
+            logger.info(
+                f"Test submitted: test_id={id}, attempt_id={attempt['id']}, user_id={user_id}, score={final_score}",
+                extra={'request_id': request_id})
             return {'score': final_score, 'correct_answers': correct_answers}
         except HTTPException:
             raise
@@ -167,11 +197,14 @@ async def submit_test(id: int, request: Request, data: SubmitRequest, user_id: i
             logger.error(f"Unexpected error submitting test: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @test_execution_router.get("/tests/{id}/stats", summary="Retrieve test statistics", response_model=StatsResponse)
 async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
     request_id = request.state.request_id
     lang = get_language(request)
-    logger.debug(f"Retrieving stats: test_id={id}, user_id={user_id}, method={request.method}, headers={dict(request.headers)}", extra={'request_id': request_id})
+    logger.debug(
+        f"Retrieving stats: test_id={id}, user_id={user_id}, method={request.method}, headers={dict(request.headers)}",
+        extra={'request_id': request_id})
 
     async with cursor:
         try:
@@ -219,7 +252,9 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
                         'average_time': stats['avg_time'] or 0
                     }
 
-            logger.info(f"Stats retrieved: test_id={id}, avg_score={avg_score}, avg_completion_time={avg_completion_time}", extra={'request_id': request_id})
+            logger.info(
+                f"Stats retrieved: test_id={id}, avg_score={avg_score}, avg_completion_time={avg_completion_time}",
+                extra={'request_id': request_id})
             return {
                 'average_score': round(avg_score, 1),
                 'completion_time': round(avg_completion_time, 1),
@@ -231,11 +266,14 @@ async def get_test_stats(id: int, request: Request, user_id: int = Depends(get_c
         except (aiomysql.OperationalError, aiomysql.Error) as e:
             raise await handle_db_error(e, request_id)
         except Exception as e:
-            logger.error(f"Unexpected error retrieving stats: {str(e)}", extra={'request_id': request_id}, exc_info=True)
+            logger.error(f"Unexpected error retrieving stats: {str(e)}", extra={'request_id': request_id},
+                         exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @test_execution_router.get("/tests/{id}/stats/export", summary="Export test statistics")
-async def export_stats(id: int, request: Request, format: str = "csv", user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+async def export_stats(id: int, request: Request, format: str = "csv", user_id: int = Depends(get_current_user),
+                       cursor=Depends(get_db)):
     request_id = request.state.request_id
     lang = get_language(request)
     logger.debug(f"Exporting stats: test_id={id}, user_id={user_id}, format={format}", extra={'request_id': request_id})
@@ -273,7 +311,8 @@ async def export_stats(id: int, request: Request, format: str = "csv", user_id: 
                 } for attempt in attempts
             ]
 
-            logger.info(f"Stats exported: test_id={id}, format={format}, records={len(data)}", extra={'request_id': request_id})
+            logger.info(f"Stats exported: test_id={id}, format={format}, records={len(data)}",
+                        extra={'request_id': request_id})
             if format == "json":
                 return data
             elif format == "excel":

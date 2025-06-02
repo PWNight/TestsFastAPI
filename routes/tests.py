@@ -43,6 +43,13 @@ class TestDetailResponse(BaseModel):
 class TestListResponse(BaseModel):
     tests: list[TestResponse]
 
+class TestResultResponse(BaseModel):
+    test_id: int
+    test_title: str
+    start_time: str
+    end_time: str
+    score: float
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), request: Request = None):
     request_id = request.state.request_id if request else 'unknown'
     logger.debug(f"Decoding JWT token: {credentials.credentials[:10]}...", extra={'request_id': request_id})
@@ -123,6 +130,47 @@ async def get_my_tests(request: Request, cursor=Depends(get_db), user_id: int = 
         except Exception as e:
             logger.error(f"Unexpected error retrieving user tests: {str(e)}", extra={'request_id': request_id}, exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
+
+@tests_router.get("/tests/results", summary="Retrieve all test attempts by the current user",
+                           response_model=dict)
+async def get_user_test_results(request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
+    request_id = request.state.request_id
+    logger.debug(f"Retrieving test results for user_id={user_id}", extra={'request_id': request_id})
+
+    async with cursor:
+        try:
+            await cursor.execute(
+                """
+                SELECT ta.test_id, t.title, ta.start_time, ta.end_time, ta.score
+                FROM test_attempts ta
+                JOIN tests t ON ta.test_id = t.id
+                WHERE ta.user_id = %s AND ta.end_time IS NOT NULL
+                ORDER BY ta.end_time DESC
+                """,
+                (user_id,)
+            )
+            attempts = await cursor.fetchall()
+
+            results = [
+                TestResultResponse(
+                    test_id=attempt['test_id'],
+                    test_title=attempt['title'],
+                    start_time=attempt['start_time'].isoformat(),
+                    end_time=attempt['end_time'].isoformat(),
+                    score=attempt['score']
+                ) for attempt in attempts
+            ]
+
+            logger.info(f"Retrieved {len(results)} test results for user_id={user_id}",
+                        extra={'request_id': request_id})
+            return {"results": results}
+        except (aiomysql.OperationalError, aiomysql.Error) as e:
+            raise await handle_db_error(e, request_id)
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving test results: {str(e)}", extra={'request_id': request_id},
+                         exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
+
 
 @tests_router.get("/tests/{id}", summary="Retrieve test details", response_model=TestDetailResponse)
 async def get_test(id: int, request: Request, user_id: int = Depends(get_current_user), cursor=Depends(get_db)):
